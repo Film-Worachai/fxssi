@@ -11,7 +11,7 @@ const BASE_INTERVAL_MS = 5 * 60 * 1000;
 const RANDOM_VARIATION_MS = 1 * 60 * 1000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CONFIG_FILE_PATH = "./telegram_subscriber.json";
-const WEBHOOK_PORT = process.env.PORT || 7070; // Port สำหรับ Express Webhook
+const WEBHOOK_PORT = process.env.PORT || 80; // Port สำหรับ Express Webhook
 // --- End Configuration ---
 
 let bot;
