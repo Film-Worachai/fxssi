@@ -3,13 +3,15 @@ require("dotenv").config();
 const axios = require("axios");
 const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
+const express = require("express"); // เพิ่ม Express
 
 // --- Configuration ---
-const API_URL = "https://c.fxssi.com/api/current-ratios";
+const API_URL_FXSSI = "https://c.fxssi.com/api/current-ratios";
 const BASE_INTERVAL_MS = 5 * 60 * 1000;
 const RANDOM_VARIATION_MS = 1 * 60 * 1000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CONFIG_FILE_PATH = "./telegram_subscriber.json";
+const WEBHOOK_PORT = process.env.PORT || 7070; // Port สำหรับ Express Webhook
 // --- End Configuration ---
 
 let bot;
@@ -17,6 +19,40 @@ let subscribedChatId = null;
 let previousSignals = {};
 let lastSuccessfulResults = [];
 let lastServerTimeText = "N/A";
+
+// --- Express App Setup ---
+const app = express();
+// Middleware สำหรับอ่าน request body ที่เป็น text/plain (สำหรับ TradingView Webhook)
+app.use(express.text({ type: "*/*" })); // รับ text/plain และอื่นๆ สำหรับ body
+
+// Route สำหรับ TradingView Webhook
+app.post("/tw", (req, res) => {
+  const webhookData = req.body; // ข้อมูลที่ TradingView ส่งมา (มักจะเป็น string)
+  console.log(`[${new Date().toLocaleString()}] Received Webhook on /tw:`);
+  console.log("Headers:", JSON.stringify(req.headers, null, 2)); // แสดง headers เพื่อ debug
+  console.log("Body:", webhookData);
+
+  // สร้างข้อความที่จะตอบกลับ และ/หรือ ส่งไป Telegram
+  const responseMessage = `Webhook received on /tw!\nData: ${webhookData}`;
+
+  // ตอบกลับไปยัง TradingView (หรือผู้เรียก Webhook)
+  res.status(200).send("Webhook processed successfully by Express server.");
+
+  // ส่งการแจ้งเตือนไปยัง Telegram หากมีผู้สมัคร
+  if (subscribedChatId && bot) {
+    const telegramMessage =
+      `🔔 *TradingView Webhook Received!*\n\n` +
+      `\`\`\`\n${webhookData}\n\`\`\`\n` +
+      `_(Source: /tw endpoint)_`;
+    sendTelegramNotification(telegramMessage, true); // true เพื่อบอกว่าเป็นข้อความพิเศษ ไม่ต้องเติม timestamp server
+  }
+});
+
+app.get("/", (req, res) => {
+  res.send("FXSSI Telegram Bot with TradingView Webhook is running!");
+});
+
+// --- End Express App Setup ---
 
 function getEmojiForSignal(signal) {
   if (!signal) return "❔";
@@ -77,7 +113,7 @@ if (TELEGRAM_BOT_TOKEN) {
     saveSubscribedChatId(chatId);
 
     const userName = msg.from.first_name || "User";
-    let responseMessage = `สวัสดีครับคุณ ${userName}! คุณได้สมัครรับการแจ้งเตือน FXSSI signals แล้ว`;
+    let responseMessage = `สวัสดีครับคุณ ${userName}! คุณได้สมัครรับการแจ้งเตือน FXSSI signals และ TradingView Webhooks แล้ว`;
 
     if (oldSubscribedChatId && oldSubscribedChatId !== chatId) {
       responseMessage += `\n(Chat ID ก่อนหน้า: ${oldSubscribedChatId} จะไม่ได้รับการแจ้งเตือนแล้ว)`;
@@ -90,7 +126,7 @@ if (TELEGRAM_BOT_TOKEN) {
 
     if (lastSuccessfulResults.length > 0 && subscribedChatId) {
       console.log(
-        "Sending current signals snapshot to newly subscribed user..."
+        "Sending current FXSSI signals snapshot to newly subscribed user..."
       );
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
@@ -113,11 +149,13 @@ if (TELEGRAM_BOT_TOKEN) {
   );
 }
 
-async function sendTelegramNotification(message, isSnapshot = false) {
+async function sendTelegramNotification(message, isSpecialMessage = false) {
+  // เปลี่ยน isSnapshot เป็น isSpecialMessage
   if (!bot || !subscribedChatId) return;
   try {
     let finalMessage = message;
-    if (!isSnapshot) {
+    if (!isSpecialMessage) {
+      // ถ้าไม่ใช่ข้อความพิเศษ (เช่น snapshot หรือ webhook) ให้เติม timestamp
       const timeString =
         lastServerTimeText !== "N/A"
           ? lastServerTimeText.split(" ")[1]
@@ -126,10 +164,8 @@ async function sendTelegramNotification(message, isSnapshot = false) {
               minute: "2-digit",
               second: "2-digit",
             });
-      finalMessage += `\n_(ข้อมูล Server ณ: ${timeString})_`;
+      finalMessage += `\n_(ข้อมูล Server FXSSI ณ: ${timeString})_`;
     }
-    // ใช้ parse_mode: 'MarkdownV2' จะดีกว่าสำหรับการ escape ตัวอักษรพิเศษ แต่ต้องระวังการ escape ให้ถูกต้อง
-    // สำหรับการ padding แบบง่ายๆ Markdown (default) ก็พอใช้ได้
     await bot.sendMessage(subscribedChatId, finalMessage, {
       parse_mode: "Markdown",
     });
@@ -142,19 +178,15 @@ async function sendTelegramNotification(message, isSnapshot = false) {
   }
 }
 
-// ฟังก์ชันสำหรับ padding string ด้านขวา
 function padRight(str, length, char = " ") {
   return str + char.repeat(Math.max(0, length - str.length));
 }
-// ฟังก์ชันสำหรับ padding string ด้านซ้าย
 function padLeft(str, length, char = " ") {
   return char.repeat(Math.max(0, length - str.length)) + str;
 }
 
-// ปรับปรุงฟังก์ชันสำหรับส่ง snapshot ของ signals ทั้งหมด
 async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
   if (!bot || !subscribedChatId) return;
-
   if (!signalsArray || signalsArray.length === 0) {
     await sendTelegramNotification(
       `*${title}*\n\nไม่มีข้อมูลสัญญาณในขณะนี้`,
@@ -162,62 +194,37 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
     );
     return;
   }
-
   let message = `*${title}*\n\n`;
   if (serverTimeText && serverTimeText !== "N/A") {
     message += `_ข้อมูล ณ ${serverTimeText} (Server Time)_\n\n`;
   } else {
     const now = new Date();
-    const dateString = now.toLocaleDateString("th-TH", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-    const timeString = now.toLocaleTimeString("th-TH", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    message += `_ข้อมูล ณ วันที่ ${dateString} เวลา ${timeString} (Local Time)_\n\n`;
+    message += `_ข้อมูล ณ ${now.toLocaleDateString(
+      "th-TH"
+    )} ${now.toLocaleTimeString("th-TH")} (Local Time)_\n\n`;
   }
-
-  // ใช้ `<code>` block เพื่อให้ spacing มีผลมากขึ้น (monospaced font)
-  message += "```\n"; // เริ่ม code block
-
-  // หาความยาวสูงสุดของชื่อ symbol เพื่อใช้ในการ padding
+  message += "```\n";
   const maxSymbolLength = Math.max(
     ...signalsArray.map((s) => s.symbol.length),
     7
-  ); // 7 คือ EUR/USD
-
+  );
   signalsArray.forEach((s) => {
     const buyVal = s.buyPercentage.toFixed(2);
     const sellVal = (100 - s.buyPercentage).toFixed(2);
-
-    // จัดรูปแบบ: [Emoji] Symbol (B: xx.xx | S: yy.yy)
     const symbolPadded = padRight(s.symbol, maxSymbolLength);
-    const buyStr = padLeft(buyVal, 5); // "xx.xx" -> 5 chars
+    const buyStr = padLeft(buyVal, 5);
     const sellStr = padLeft(sellVal, 5);
-
-    // \u2003 คือ em-space ซึ่งกว้างกว่า space ปกติ อาจช่วยจัดคอลัมน์ได้ดีขึ้นเล็กน้อย
-    // หรือใช้ space ธรรมดาก็ได้
-    const space = " "; // หรือ "\u2003"
-
     message += `${getEmojiForSignal(
       s.overallSignal
-    )} ${symbolPadded}${space}(B:${buyStr} | S:${sellStr})\n`;
+    )} ${symbolPadded} (B:${buyStr} | S:${sellStr})\n`;
   });
-  message += "```\n"; // จบ code block
-
+  message += "```\n";
   if (message.length > 4000) {
-    // ตรวจสอบความยาวอีกครั้งหลังจัดรูปแบบ
-    message =
-      `*${title}*\n\nรายการสัญญาณยาวเกินกว่าจะแสดงในข้อความเดียว.\n` +
-      `กรุณาตรวจสอบ Console log สำหรับรายละเอียดทั้งหมด.\n`;
+    message = `*${title}*\n\nรายการสัญญาณยาวเกินไป.\n`;
     if (serverTimeText && serverTimeText !== "N/A") {
       message += `_ข้อมูล ณ ${serverTimeText} (Server Time)_`;
     }
   }
-
   await sendTelegramNotification(message.trim(), true);
 }
 
@@ -232,39 +239,30 @@ function handleTelegramSendError(error) {
     );
     subscribedChatId = null;
     try {
-      if (fs.existsSync(CONFIG_FILE_PATH)) {
-        fs.unlinkSync(CONFIG_FILE_PATH);
-        console.log(`Removed ${CONFIG_FILE_PATH} due to send error.`);
-      }
+      if (fs.existsSync(CONFIG_FILE_PATH)) fs.unlinkSync(CONFIG_FILE_PATH);
     } catch (e) {
       console.error("Error deleting subscriber config file:", e);
     }
   } else {
-    const errMsg = error.response
-      ? error.response.data
-        ? error.response.data.description
-        : error.message
-      : error.message;
     console.error(
       `Failed to send Telegram notification to ${subscribedChatId}:`,
-      errMsg
+      error.message
     );
   }
 }
 
-async function fetchDataAndProcess() {
+async function fetchDataAndProcessFxssi() {
+  // เปลี่ยนชื่อฟังก์ชันให้ชัดเจน
   const fetchTime = new Date().toLocaleString("en-US", {
     timeZone: "Asia/Bangkok",
   });
   console.log(`\n[${fetchTime}] Fetching new data from FXSSI...`);
   try {
-    const response = await axios.get(API_URL);
+    const response = await axios.get(API_URL_FXSSI);
     const jsonData = response.data;
-
     if (jsonData && jsonData.pairs) {
       lastServerTimeText = jsonData.server_time_text || "N/A";
-      console.log(`Data fetched. Server time: ${lastServerTimeText}`);
-
+      console.log(`FXSSI Data fetched. Server time: ${lastServerTimeText}`);
       const currentRunResults = [];
       for (const pairSymbol in jsonData.pairs) {
         if (jsonData.pairs.hasOwnProperty(pairSymbol)) {
@@ -272,12 +270,9 @@ async function fetchDataAndProcess() {
           if (pairData && pairData.hasOwnProperty("average")) {
             const buyPercentage = parseFloat(pairData.average);
             if (isNaN(buyPercentage)) continue;
-
             let overallSignal = "HOLD";
-            // Contrarian interpretation (เหมือนเดิม)
             if (buyPercentage > 55) overallSignal = "SELL";
             else if (buyPercentage < 45) overallSignal = "BUY";
-
             currentRunResults.push({
               symbol: pairSymbol,
               buyPercentage: buyPercentage,
@@ -286,40 +281,27 @@ async function fetchDataAndProcess() {
           }
         }
       }
-
       currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
       lastSuccessfulResults = [...currentRunResults];
-
-      console.log("--- Current Data (Sorted by Buy % High to Low) ---");
-      const maxSymbolLengthConsole = Math.max(
-        ...currentRunResults.map((s) => s.symbol.length),
-        7
-      );
-      currentRunResults.forEach((result) => {
-        const buyStr = result.buyPercentage.toFixed(2);
-        const sellStr = (100 - result.buyPercentage).toFixed(2);
-        const symbolPadded = padRight(result.symbol, maxSymbolLengthConsole);
-        console.log(
-          `${getEmojiForSignal(
-            result.overallSignal
-          )} ${symbolPadded} (B: ${padLeft(buyStr, 5)} | S: ${padLeft(
-            sellStr,
-            5
-          )}) -> Signal: ${result.overallSignal}`
-        );
-      });
-      console.log("--- End of Current Data ---");
+      // console.log("--- Current FXSSI Data (Sorted by Buy % High to Low) ---");
+      // const maxSymbolLengthConsole = Math.max(...currentRunResults.map(s => s.symbol.length), 7);
+      // currentRunResults.forEach(result => {
+      //     const buyStr = result.buyPercentage.toFixed(2);
+      //     const sellStr = (100 - result.buyPercentage).toFixed(2);
+      //     const symbolPadded = padRight(result.symbol, maxSymbolLengthConsole);
+      //     console.log(`${getEmojiForSignal(result.overallSignal)} ${symbolPadded} (B: ${padLeft(buyStr,5)} | S: ${padLeft(sellStr,5)}) -> Signal: ${result.overallSignal}`);
+      // });
+      // console.log("--- End of Current FXSSI Data ---");
 
       const isFirstRunPopulatingSignals =
         Object.keys(previousSignals).length === 0;
-
       if (
         isFirstRunPopulatingSignals &&
         subscribedChatId &&
         currentRunResults.length > 0
       ) {
         console.log(
-          "First successful data fetch. Sending initial signals snapshot..."
+          "First successful FXSSI data fetch. Sending initial signals snapshot..."
         );
         await sendInitialSignalsSnapshot(
           currentRunResults,
@@ -327,13 +309,11 @@ async function fetchDataAndProcess() {
           lastServerTimeText
         );
       }
-
       let changesDetectedThisRun = 0;
       if (!isFirstRunPopulatingSignals) {
         currentRunResults.forEach((result) => {
           const lastOverallSignal = previousSignals[result.symbol];
           const currentOverallSignal = result.overallSignal;
-
           if (
             lastOverallSignal !== undefined &&
             currentOverallSignal !== lastOverallSignal &&
@@ -343,16 +323,15 @@ async function fetchDataAndProcess() {
             const buyP = result.buyPercentage.toFixed(2);
             const sellP = (100 - result.buyPercentage).toFixed(2);
             const message =
-              `🔔 *${result.symbol} เปลี่ยนแปลงสัญญาณ!* ${getEmojiForSignal(
+              `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
               `   Sentiment: (B: ${buyP} | S: ${sellP})`;
-            sendTelegramNotification(message);
+            sendTelegramNotification(message); // isSpecialMessage เป็น false โดย default
           }
         });
       }
-
       const newPreviousSignals = {};
       currentRunResults.forEach((result) => {
         newPreviousSignals[result.symbol] = result.overallSignal;
@@ -361,65 +340,72 @@ async function fetchDataAndProcess() {
 
       if (isFirstRunPopulatingSignals && currentRunResults.length > 0) {
         console.log(
-          "Initial signal data populated and snapshot sent. Monitoring for changes."
+          "Initial FXSSI signal data populated. Monitoring for changes."
         );
       } else if (changesDetectedThisRun === 0 && !isFirstRunPopulatingSignals) {
-        console.log(
-          "No significant overall signal changes (to BUY/SELL) detected in this run."
-        );
-      } else if (currentRunResults.length === 0) {
-        console.log(
-          "No currency pair data found in the API response this run."
-        );
+        // console.log("No significant FXSSI overall signal changes detected."); // ลด log ที่ console
       }
     } else {
       console.log("Could not find 'pairs' data in the FXSSI response.");
-      lastServerTimeText = "N/A (API error)";
+      lastServerTimeText = "N/A (FXSSI API error)";
     }
   } catch (error) {
-    console.error("Error during data fetch or processing:", error.message);
-    lastServerTimeText = "N/A (Fetch error)";
-    if (error.response)
-      console.error("API Response Status:", error.response.status);
-    else if (error.request)
-      console.error("No response received from API:", error.request);
+    console.error(
+      "Error during FXSSI data fetch or processing:",
+      error.message
+    );
+    lastServerTimeText = "N/A (FXSSI Fetch error)";
   } finally {
     const randomOffset =
       Math.random() * 2 * RANDOM_VARIATION_MS - RANDOM_VARIATION_MS;
     const nextInterval = BASE_INTERVAL_MS + randomOffset;
-
-    console.log(
-      `Next data fetch scheduled in approximately ${(
-        nextInterval / 60000
-      ).toFixed(2)} minutes.`
-    );
-    setTimeout(fetchDataAndProcess, nextInterval);
+    setTimeout(fetchDataAndProcessFxssi, nextInterval); // เรียกตัวเองซ้ำ
   }
 }
 
 // --- Initialization ---
-console.log("Initializing FXSSI Signal Monitor...");
-if (bot) {
+console.log("Initializing FXSSI Signal Monitor with Webhook...");
+
+if (TELEGRAM_BOT_TOKEN) {
+  // เริ่ม Express server
+  app
+    .listen(WEBHOOK_PORT, () => {
+      console.log(
+        `Express server with Webhook listening on port ${WEBHOOK_PORT}`
+      );
+      console.log(
+        `Webhook endpoint: http://localhost:${WEBHOOK_PORT}/tw (POST)`
+      );
+    })
+    .on("error", (err) => {
+      console.error(
+        `Failed to start Express server on port ${WEBHOOK_PORT}:`,
+        err.message
+      );
+      if (err.code === "EADDRINUSE") {
+        console.error(
+          `Port ${WEBHOOK_PORT} is already in use. Please choose another port or stop the existing service.`
+        );
+      }
+      process.exit(1); // ออกจากโปรแกรมถ้า server start ไม่ได้
+    });
+
+  // เริ่มการดึงข้อมูล FXSSI
+  fetchDataAndProcessFxssi();
+  console.log("FXSSI Signal Monitor part is running. Press Ctrl+C to stop.");
+
   if (!subscribedChatId) {
     console.log(
       "To receive Telegram notifications, send the /start command to your bot on Telegram."
     );
   } else {
     console.log(
-      `Currently subscribed to send notifications to Chat ID: ${subscribedChatId}. Awaiting first data fetch...`
+      `Currently subscribed to send notifications to Chat ID: ${subscribedChatId}.`
     );
   }
 } else {
-  console.log(
-    "Telegram bot is not properly configured (TELEGRAM_BOT_TOKEN missing). No Telegram notifications will be sent."
-  );
-}
-
-if (TELEGRAM_BOT_TOKEN) {
-  fetchDataAndProcess();
-  console.log("FXSSI Signal Monitor is running. Press Ctrl+C to stop.");
-} else {
   console.error(
-    "FXSSI Signal Monitor cannot start without TELEGRAM_BOT_TOKEN."
+    "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set. FXSSI Monitor and Telegram Bot cannot start."
   );
+  process.exit(1); // ออกจากโปรแกรมถ้าไม่มี token
 }
