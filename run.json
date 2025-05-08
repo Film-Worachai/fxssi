@@ -1,0 +1,10 @@
+[
+    {
+        "name": "fxssi",
+        "script": "app.js",
+        "watch": true,
+        "autorestart": true,
+        "max_memory_restart": "999M",
+        "restart_delay": 19000
+    }
+]
