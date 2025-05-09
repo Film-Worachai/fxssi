@@ -22,36 +22,26 @@ let lastServerTimeText = "N/A";
 
 // --- Express App Setup ---
 const app = express();
-// Middleware สำหรับอ่าน request body ที่เป็น text/plain (สำหรับ TradingView Webhook)
-app.use(express.text({ type: "*/*" })); // รับ text/plain และอื่นๆ สำหรับ body
+app.use(express.text({ type: "*/*" }));
 
-// Route สำหรับ TradingView Webhook
 app.post("/tw", (req, res) => {
-  const webhookData = req.body; // ข้อมูลที่ TradingView ส่งมา (มักจะเป็น string)
+  const webhookData = req.body;
   console.log(`[${new Date().toLocaleString()}] Received Webhook on /tw:`);
-  console.log("Headers:", JSON.stringify(req.headers, null, 2)); // แสดง headers เพื่อ debug
+  console.log("Headers:", JSON.stringify(req.headers, null, 2));
   console.log("Body:", webhookData);
-
-  // สร้างข้อความที่จะตอบกลับ และ/หรือ ส่งไป Telegram
-  const responseMessage = `Webhook received on /tw!\nData: ${webhookData}`;
-
-  // ตอบกลับไปยัง TradingView (หรือผู้เรียก Webhook)
   res.status(200).send("Webhook processed successfully by Express server.");
-
-  // ส่งการแจ้งเตือนไปยัง Telegram หากมีผู้สมัคร
   if (subscribedChatId && bot) {
     const telegramMessage =
       `🔔 *TradingView Webhook Received!*\n\n` +
       `\`\`\`\n${webhookData}\n\`\`\`\n` +
       `_(Source: /tw endpoint)_`;
-    sendTelegramNotification(telegramMessage, true); // true เพื่อบอกว่าเป็นข้อความพิเศษ ไม่ต้องเติม timestamp server
+    sendTelegramNotification(telegramMessage, true);
   }
 });
 
 app.get("/", (req, res) => {
   res.send("FXSSI Telegram Bot with TradingView Webhook is running!");
 });
-
 // --- End Express App Setup ---
 
 function getEmojiForSignal(signal) {
@@ -128,6 +118,7 @@ if (TELEGRAM_BOT_TOKEN) {
       console.log(
         "Sending current FXSSI signals snapshot to newly subscribed user..."
       );
+      // lastSuccessfulResults จะถูกเรียงตาม buyPercentage แล้วจาก fetchDataAndProcessFxssi
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
         `📊 สรุป Sentiment FXSSI (หลัง /start)`,
@@ -150,12 +141,10 @@ if (TELEGRAM_BOT_TOKEN) {
 }
 
 async function sendTelegramNotification(message, isSpecialMessage = false) {
-  // เปลี่ยน isSnapshot เป็น isSpecialMessage
   if (!bot || !subscribedChatId) return;
   try {
     let finalMessage = message;
     if (!isSpecialMessage) {
-      // ถ้าไม่ใช่ข้อความพิเศษ (เช่น snapshot หรือ webhook) ให้เติม timestamp
       const timeString =
         lastServerTimeText !== "N/A" && lastServerTimeText.includes(" ")
           ? lastServerTimeText.split(" ")[1]
@@ -204,16 +193,18 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
     )} ${now.toLocaleTimeString("th-TH")} (Local Time)_\n\n`;
   }
   message += "```\n";
+  // signalsArray ที่เข้ามาควรจะเรียงลำดับตาม buyPercentage จากมากไปน้อยแล้ว
   const maxSymbolLength = Math.max(
     ...signalsArray.map((s) => s.symbol.length),
     7
   );
   signalsArray.forEach((s) => {
-    const buyVal = s.buyPercentage.toFixed(2);
-    const sellVal = (100 - s.buyPercentage).toFixed(2);
+    const buyVal = s.buyPercentage.toFixed(2); // This is FXSSI's "average" (Buy % for base currency)
+    const sellVal = (100 - s.buyPercentage).toFixed(2); // Sell % for base currency
     const symbolPadded = padRight(s.symbol, maxSymbolLength);
     const buyStr = padLeft(buyVal, 5);
     const sellStr = padLeft(sellVal, 5);
+    // แสดงผล: B คือ % Buy ของสกุลเงินฐาน, S คือ % Sell ของสกุลเงินฐาน
     message += `${getEmojiForSignal(
       s.overallSignal
     )} ${symbolPadded} (B:${buyStr} | S:${sellStr})\n`;
@@ -252,7 +243,6 @@ function handleTelegramSendError(error) {
 }
 
 async function fetchDataAndProcessFxssi() {
-  // เปลี่ยนชื่อฟังก์ชันให้ชัดเจน
   const fetchTime = new Date().toLocaleString("en-US", {
     timeZone: "Asia/Bangkok",
   });
@@ -268,24 +258,28 @@ async function fetchDataAndProcessFxssi() {
         if (jsonData.pairs.hasOwnProperty(pairSymbol)) {
           const pairData = jsonData.pairs[pairSymbol];
           if (pairData && pairData.hasOwnProperty("average")) {
-            const buyPercentage = parseFloat(pairData.average);
+            const buyPercentage = parseFloat(pairData.average); // This is % of BUY for the base currency
             if (isNaN(buyPercentage)) continue;
             let overallSignal = "HOLD";
-            if (buyPercentage > 55)
-              overallSignal =
-                "SELL"; // FXSSI logic: >55% is BUY for the base currency, meaning SELL for the pair (e.g., EURUSD, if EUR buy > 55%, pair is SELL)
-            else if (buyPercentage < 45) overallSignal = "BUY"; // FXSSI logic: <45% is SELL for the base currency, meaning BUY for the pair
+            // FXSSI logic: if base currency BUY > 55%, means base is strong, so SELL the pair
+            if (buyPercentage > 55) overallSignal = "SELL";
+            // FXSSI logic: if base currency BUY < 45%, means base is weak, so BUY the pair
+            else if (buyPercentage < 45) overallSignal = "BUY";
             currentRunResults.push({
               symbol: pairSymbol,
-              buyPercentage: buyPercentage, // Note: FXSSI's "average" is the percentage of BUY positions for the base currency.
+              buyPercentage: buyPercentage, // Storing FXSSI's "average"
               overallSignal: overallSignal,
             });
           }
         }
       }
-      // Sort by symbol name for consistent order before comparison and in snapshots
-      currentRunResults.sort((a, b) => a.symbol.localeCompare(b.symbol));
-      lastSuccessfulResults = [...currentRunResults];
+
+      // *** MODIFICATION: Sort by buyPercentage (FXSSI's average) from high to low ***
+      // This means pairs where the base currency has a high buy % (strong SELL signal for the pair) will appear first.
+      currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
+      // *** END MODIFICATION ***
+
+      lastSuccessfulResults = [...currentRunResults]; // Now sorted by buyPercentage
 
       const isFirstRunPopulatingSignals =
         Object.keys(previousSignals).length === 0;
@@ -297,44 +291,39 @@ async function fetchDataAndProcessFxssi() {
         console.log(
           "First successful FXSSI data fetch. Sending initial signals snapshot..."
         );
+        // currentRunResults is now sorted by buyPercentage
         await sendInitialSignalsSnapshot(
           currentRunResults,
           "📊 สรุป Sentiment FXSSI เริ่มต้น",
           lastServerTimeText
         );
       }
+
       let changesDetectedThisRun = 0;
       if (!isFirstRunPopulatingSignals) {
+        // The loop below will now process changes based on the buyPercentage sorted order
         currentRunResults.forEach((result) => {
           const lastOverallSignal = previousSignals[result.symbol];
           const currentOverallSignal = result.overallSignal;
-          // *** START MODIFICATION ***
-          // Send notification if the signal has actually changed
           if (
             lastOverallSignal !== undefined &&
             currentOverallSignal !== lastOverallSignal
           ) {
-            // *** END MODIFICATION ***
             changesDetectedThisRun++;
-            // Note: FXSSI's "average" is BUY for the base currency.
-            // So, if average is 60% (BUY for base), the pair signal is SELL.
-            // If average is 40% (SELL for base), the pair signal is BUY.
-            // The buyPercentage in our code reflects FXSSI's "average".
-            // So, for display, we'll show the "average" as "Sentiment BUY base"
-            // and (100 - average) as "Sentiment SELL base"
-            const sentimentBuyBase = result.buyPercentage.toFixed(2);
-            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2);
+            const sentimentBuyBase = result.buyPercentage.toFixed(2); // % Buy of base currency
+            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2); // % Sell of base currency
 
             const message =
               `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`; // Adjusted message for clarity
+              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`;
             sendTelegramNotification(message);
           }
         });
       }
+
       const newPreviousSignals = {};
       currentRunResults.forEach((result) => {
         newPreviousSignals[result.symbol] = result.overallSignal;
@@ -346,7 +335,7 @@ async function fetchDataAndProcessFxssi() {
           "Initial FXSSI signal data populated. Monitoring for changes."
         );
       } else if (changesDetectedThisRun === 0 && !isFirstRunPopulatingSignals) {
-        // console.log("No significant FXSSI overall signal changes detected."); // Optional: uncomment for less console noise
+        // console.log("No significant FXSSI overall signal changes detected.");
       }
     } else {
       console.log("Could not find 'pairs' data in the FXSSI response.");
@@ -362,7 +351,7 @@ async function fetchDataAndProcessFxssi() {
     const randomOffset =
       Math.random() * 2 * RANDOM_VARIATION_MS - RANDOM_VARIATION_MS;
     const nextInterval = BASE_INTERVAL_MS + randomOffset;
-    setTimeout(fetchDataAndProcessFxssi, nextInterval); // เรียกตัวเองซ้ำ
+    setTimeout(fetchDataAndProcessFxssi, nextInterval);
   }
 }
 
@@ -370,7 +359,6 @@ async function fetchDataAndProcessFxssi() {
 console.log("Initializing FXSSI Signal Monitor with Webhook...");
 
 if (TELEGRAM_BOT_TOKEN) {
-  // เริ่ม Express server
   app
     .listen(WEBHOOK_PORT, () => {
       console.log(
@@ -390,10 +378,9 @@ if (TELEGRAM_BOT_TOKEN) {
           `Port ${WEBHOOK_PORT} is already in use. Please choose another port or stop the existing service.`
         );
       }
-      process.exit(1); // ออกจากโปรแกรมถ้า server start ไม่ได้
+      process.exit(1);
     });
 
-  // เริ่มการดึงข้อมูล FXSSI
   fetchDataAndProcessFxssi();
   console.log("FXSSI Signal Monitor part is running. Press Ctrl+C to stop.");
 
@@ -410,5 +397,5 @@ if (TELEGRAM_BOT_TOKEN) {
   console.error(
     "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set. FXSSI Monitor and Telegram Bot cannot start."
   );
-  process.exit(1); // ออกจากโปรแกรมถ้าไม่มี token
+  process.exit(1);
 }
