@@ -157,7 +157,7 @@ async function sendTelegramNotification(message, isSpecialMessage = false) {
     if (!isSpecialMessage) {
       // ถ้าไม่ใช่ข้อความพิเศษ (เช่น snapshot หรือ webhook) ให้เติม timestamp
       const timeString =
-        lastServerTimeText !== "N/A" && lastServerTimeText.includes(" ")
+        lastServerTimeText !== "N/A"
           ? lastServerTimeText.split(" ")[1]
           : new Date().toLocaleTimeString("th-TH", {
               hour: "2-digit",
@@ -271,21 +271,27 @@ async function fetchDataAndProcessFxssi() {
             const buyPercentage = parseFloat(pairData.average);
             if (isNaN(buyPercentage)) continue;
             let overallSignal = "HOLD";
-            if (buyPercentage > 55)
-              overallSignal =
-                "SELL"; // FXSSI logic: >55% is BUY for the base currency, meaning SELL for the pair (e.g., EURUSD, if EUR buy > 55%, pair is SELL)
-            else if (buyPercentage < 45) overallSignal = "BUY"; // FXSSI logic: <45% is SELL for the base currency, meaning BUY for the pair
+            if (buyPercentage > 55) overallSignal = "SELL";
+            else if (buyPercentage < 45) overallSignal = "BUY";
             currentRunResults.push({
               symbol: pairSymbol,
-              buyPercentage: buyPercentage, // Note: FXSSI's "average" is the percentage of BUY positions for the base currency.
+              buyPercentage: buyPercentage,
               overallSignal: overallSignal,
             });
           }
         }
       }
-      // Sort by symbol name for consistent order before comparison and in snapshots
-      currentRunResults.sort((a, b) => a.symbol.localeCompare(b.symbol));
+      currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
       lastSuccessfulResults = [...currentRunResults];
+      // console.log("--- Current FXSSI Data (Sorted by Buy % High to Low) ---");
+      // const maxSymbolLengthConsole = Math.max(...currentRunResults.map(s => s.symbol.length), 7);
+      // currentRunResults.forEach(result => {
+      //     const buyStr = result.buyPercentage.toFixed(2);
+      //     const sellStr = (100 - result.buyPercentage).toFixed(2);
+      //     const symbolPadded = padRight(result.symbol, maxSymbolLengthConsole);
+      //     console.log(`${getEmojiForSignal(result.overallSignal)} ${symbolPadded} (B: ${padLeft(buyStr,5)} | S: ${padLeft(sellStr,5)}) -> Signal: ${result.overallSignal}`);
+      // });
+      // console.log("--- End of Current FXSSI Data ---");
 
       const isFirstRunPopulatingSignals =
         Object.keys(previousSignals).length === 0;
@@ -308,30 +314,21 @@ async function fetchDataAndProcessFxssi() {
         currentRunResults.forEach((result) => {
           const lastOverallSignal = previousSignals[result.symbol];
           const currentOverallSignal = result.overallSignal;
-          // *** START MODIFICATION ***
-          // Send notification if the signal has actually changed
           if (
             lastOverallSignal !== undefined &&
-            currentOverallSignal !== lastOverallSignal
+            currentOverallSignal !== lastOverallSignal &&
+            currentOverallSignal !== "HOLD"
           ) {
-            // *** END MODIFICATION ***
             changesDetectedThisRun++;
-            // Note: FXSSI's "average" is BUY for the base currency.
-            // So, if average is 60% (BUY for base), the pair signal is SELL.
-            // If average is 40% (SELL for base), the pair signal is BUY.
-            // The buyPercentage in our code reflects FXSSI's "average".
-            // So, for display, we'll show the "average" as "Sentiment BUY base"
-            // and (100 - average) as "Sentiment SELL base"
-            const sentimentBuyBase = result.buyPercentage.toFixed(2);
-            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2);
-
+            const buyP = result.buyPercentage.toFixed(2);
+            const sellP = (100 - result.buyPercentage).toFixed(2);
             const message =
               `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`; // Adjusted message for clarity
-            sendTelegramNotification(message);
+              `   Sentiment: (B: ${buyP} | S: ${sellP})`;
+            sendTelegramNotification(message); // isSpecialMessage เป็น false โดย default
           }
         });
       }
@@ -346,7 +343,7 @@ async function fetchDataAndProcessFxssi() {
           "Initial FXSSI signal data populated. Monitoring for changes."
         );
       } else if (changesDetectedThisRun === 0 && !isFirstRunPopulatingSignals) {
-        // console.log("No significant FXSSI overall signal changes detected."); // Optional: uncomment for less console noise
+        // console.log("No significant FXSSI overall signal changes detected."); // ลด log ที่ console
       }
     } else {
       console.log("Could not find 'pairs' data in the FXSSI response.");
