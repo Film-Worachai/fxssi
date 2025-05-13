@@ -129,7 +129,7 @@ if (TELEGRAM_BOT_TOKEN) {
       );
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
-        `📊 สรุป Sentiment FXSSI (หลัง /start)`,
+        `📊 สรุป Sentiment FXSSI (/start)`,
         lastServerTimeText
       );
     }
@@ -144,7 +144,7 @@ if (TELEGRAM_BOT_TOKEN) {
           ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
           : "N/A";
       const specialXauMessage =
-        `*สถานะสัญญาณทองคำพิเศษ (XAUUSD vs USDX) ปัจจุบัน:*\n` +
+        `*🚀🚀 สถานะสัญญาณทองคำ (XAUUSD vs USDX) :*\n` +
         `${getEmojiForSignal(
           previousXauUsdSpecialSignal
         )} \`${previousXauUsdSpecialSignal}\`\n` +
@@ -318,7 +318,7 @@ async function fetchDataAndProcessFxssi() {
         );
         await sendInitialSignalsSnapshot(
           currentRunResults,
-          "📊 สรุป Sentiment FXSSI เริ่มต้น",
+          "📊 สรุป Sentiment FXSSI (/start)",
           lastServerTimeText
         );
       }
