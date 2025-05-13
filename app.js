@@ -103,6 +103,8 @@ if (TELEGRAM_BOT_TOKEN) {
   console.log("Telegram Bot initialized and polling for messages.");
   loadSubscribedChatId();
 
+  bot.setMyCommands([{ command: "/start", description: "start" }]);
+
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     const oldSubscribedChatId = subscribedChatId;
