@@ -19,6 +19,7 @@ let subscribedChatId = null;
 let previousSignals = {};
 let lastSuccessfulResults = [];
 let lastServerTimeText = "N/A";
+let previousXauUsdSpecialSignal = null; // <<-- เพิ่มตัวแปรสำหรับสัญญาณพิเศษ XAUUSD
 
 // --- Express App Setup ---
 const app = express();
@@ -46,7 +47,13 @@ app.get("/", (req, res) => {
 
 function getEmojiForSignal(signal) {
   if (!signal) return "❔";
-  switch (signal.toUpperCase()) {
+  const upperSignal = signal.toUpperCase();
+  // <<-- เพิ่มการจัดการสำหรับสัญญาณทองคำพิเศษ
+  if (upperSignal.includes("BUY GOLD")) return "📈";
+  if (upperSignal.includes("SELL GOLD")) return "📉";
+  if (upperSignal.includes("HOLD GOLD")) return "⚖️";
+  // -->>
+  switch (upperSignal) {
     case "BUY":
       return "📈";
     case "SELL":
@@ -118,13 +125,32 @@ if (TELEGRAM_BOT_TOKEN) {
       console.log(
         "Sending current FXSSI signals snapshot to newly subscribed user..."
       );
-      // lastSuccessfulResults จะถูกเรียงตาม buyPercentage แล้วจาก fetchDataAndProcessFxssi
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
         `📊 สรุป Sentiment FXSSI (หลัง /start)`,
         lastServerTimeText
       );
     }
+    // <<-- อาจจะส่งสถานะสัญญาณ XAUUSD พิเศษปัจจุบันให้ด้วยถ้าต้องการ
+    if (previousXauUsdSpecialSignal && subscribedChatId) {
+      const xauAvg =
+        jsonDataCacheForStartup && jsonDataCacheForStartup.pairs.XAUUSD
+          ? parseFloat(jsonDataCacheForStartup.pairs.XAUUSD.average).toFixed(2)
+          : "N/A";
+      const usdxAvg =
+        jsonDataCacheForStartup && jsonDataCacheForStartup.pairs.USDX
+          ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
+          : "N/A";
+      const specialXauMessage =
+        `*สถานะสัญญาณทองคำพิเศษ (XAUUSD vs USDX) ปัจจุบัน:*\n` +
+        `${getEmojiForSignal(
+          previousXauUsdSpecialSignal
+        )} \`${previousXauUsdSpecialSignal}\`\n` +
+        `   XAUUSD avg: ${xauAvg}%\n` +
+        `   USDX avg: ${usdxAvg}%`;
+      sendTelegramNotification(specialXauMessage, true);
+    }
+    // -->>
   });
 
   bot.on("polling_error", (error) => {
@@ -193,18 +219,16 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
     )} ${now.toLocaleTimeString("th-TH")} (Local Time)_\n\n`;
   }
   message += "```\n";
-  // signalsArray ที่เข้ามาควรจะเรียงลำดับตาม buyPercentage จากมากไปน้อยแล้ว
   const maxSymbolLength = Math.max(
     ...signalsArray.map((s) => s.symbol.length),
     7
   );
   signalsArray.forEach((s) => {
-    const buyVal = s.buyPercentage.toFixed(2); // This is FXSSI's "average" (Buy % for base currency)
-    const sellVal = (100 - s.buyPercentage).toFixed(2); // Sell % for base currency
+    const buyVal = s.buyPercentage.toFixed(2);
+    const sellVal = (100 - s.buyPercentage).toFixed(2);
     const symbolPadded = padRight(s.symbol, maxSymbolLength);
     const buyStr = padLeft(buyVal, 5);
     const sellStr = padLeft(sellVal, 5);
-    // แสดงผล: B คือ % Buy ของสกุลเงินฐาน, S คือ % Sell ของสกุลเงินฐาน
     message += `${getEmojiForSignal(
       s.overallSignal
     )} ${symbolPadded} (B:${buyStr} | S:${sellStr})\n`;
@@ -242,6 +266,8 @@ function handleTelegramSendError(error) {
   }
 }
 
+let jsonDataCacheForStartup = null; // <<-- Cache jsonData for /start if needed
+
 async function fetchDataAndProcessFxssi() {
   const fetchTime = new Date().toLocaleString("en-US", {
     timeZone: "Asia/Bangkok",
@@ -250,48 +276,44 @@ async function fetchDataAndProcessFxssi() {
   try {
     const response = await axios.get(API_URL_FXSSI);
     const jsonData = response.data;
+    jsonDataCacheForStartup = jsonData; // <<-- Cache for /start command
+
     if (jsonData && jsonData.pairs) {
       lastServerTimeText = jsonData.server_time_text || "N/A";
       console.log(`FXSSI Data fetched. Server time: ${lastServerTimeText}`);
       const currentRunResults = [];
+
+      // --- Process General Signals (เดิม) ---
       for (const pairSymbol in jsonData.pairs) {
         if (jsonData.pairs.hasOwnProperty(pairSymbol)) {
           const pairData = jsonData.pairs[pairSymbol];
           if (pairData && pairData.hasOwnProperty("average")) {
-            const buyPercentage = parseFloat(pairData.average); // This is % of BUY for the base currency
+            const buyPercentage = parseFloat(pairData.average);
             if (isNaN(buyPercentage)) continue;
             let overallSignal = "HOLD";
-            // FXSSI logic: if base currency BUY > 55%, means base is strong, so SELL the pair
             if (buyPercentage > 55) overallSignal = "SELL";
-            // FXSSI logic: if base currency BUY < 45%, means base is weak, so BUY the pair
             else if (buyPercentage < 45) overallSignal = "BUY";
             currentRunResults.push({
               symbol: pairSymbol,
-              buyPercentage: buyPercentage, // Storing FXSSI's "average"
+              buyPercentage: buyPercentage,
               overallSignal: overallSignal,
             });
           }
         }
       }
-
-      // *** MODIFICATION: Sort by buyPercentage (FXSSI's average) from high to low ***
-      // This means pairs where the base currency has a high buy % (strong SELL signal for the pair) will appear first.
       currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
-      // *** END MODIFICATION ***
+      lastSuccessfulResults = [...currentRunResults];
 
-      lastSuccessfulResults = [...currentRunResults]; // Now sorted by buyPercentage
-
-      const isFirstRunPopulatingSignals =
+      const isFirstRunPopulatingGeneralSignals =
         Object.keys(previousSignals).length === 0;
       if (
-        isFirstRunPopulatingSignals &&
+        isFirstRunPopulatingGeneralSignals &&
         subscribedChatId &&
         currentRunResults.length > 0
       ) {
         console.log(
-          "First successful FXSSI data fetch. Sending initial signals snapshot..."
+          "First successful FXSSI data fetch. Sending initial general signals snapshot..."
         );
-        // currentRunResults is now sorted by buyPercentage
         await sendInitialSignalsSnapshot(
           currentRunResults,
           "📊 สรุป Sentiment FXSSI เริ่มต้น",
@@ -299,9 +321,8 @@ async function fetchDataAndProcessFxssi() {
         );
       }
 
-      let changesDetectedThisRun = 0;
-      if (!isFirstRunPopulatingSignals) {
-        // The loop below will now process changes based on the buyPercentage sorted order
+      let generalChangesDetected = 0;
+      if (!isFirstRunPopulatingGeneralSignals) {
         currentRunResults.forEach((result) => {
           const lastOverallSignal = previousSignals[result.symbol];
           const currentOverallSignal = result.overallSignal;
@@ -309,10 +330,9 @@ async function fetchDataAndProcessFxssi() {
             lastOverallSignal !== undefined &&
             currentOverallSignal !== lastOverallSignal
           ) {
-            changesDetectedThisRun++;
-            const sentimentBuyBase = result.buyPercentage.toFixed(2); // % Buy of base currency
-            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2); // % Sell of base currency
-
+            generalChangesDetected++;
+            const sentimentBuyBase = result.buyPercentage.toFixed(2);
+            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2);
             const message =
               `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
                 currentOverallSignal
@@ -323,20 +343,79 @@ async function fetchDataAndProcessFxssi() {
           }
         });
       }
-
       const newPreviousSignals = {};
       currentRunResults.forEach((result) => {
         newPreviousSignals[result.symbol] = result.overallSignal;
       });
       previousSignals = newPreviousSignals;
-
-      if (isFirstRunPopulatingSignals && currentRunResults.length > 0) {
+      if (isFirstRunPopulatingGeneralSignals && currentRunResults.length > 0) {
         console.log(
-          "Initial FXSSI signal data populated. Monitoring for changes."
+          "Initial general FXSSI signal data populated. Monitoring for changes."
         );
-      } else if (changesDetectedThisRun === 0 && !isFirstRunPopulatingSignals) {
-        // console.log("No significant FXSSI overall signal changes detected.");
+      } else if (
+        generalChangesDetected === 0 &&
+        !isFirstRunPopulatingGeneralSignals
+      ) {
+        // console.log("No significant general FXSSI signal changes detected.");
       }
+      // --- End Process General Signals ---
+
+      // --- Process Special XAUUSD Signal (ใหม่) ---
+      if (
+        jsonData.pairs.XAUUSD &&
+        jsonData.pairs.XAUUSD.average &&
+        jsonData.pairs.USDX &&
+        jsonData.pairs.USDX.average
+      ) {
+        const xauusdAvg = parseFloat(jsonData.pairs.XAUUSD.average);
+        const usdxAvg = parseFloat(jsonData.pairs.USDX.average);
+        let currentXauUsdSpecialSignal = "HOLD GOLD";
+
+        if (xauusdAvg > 55 && usdxAvg < 50) {
+          currentXauUsdSpecialSignal = "SELL GOLD (USDX Weak)";
+        } else if (xauusdAvg < 45 && usdxAvg > 50) {
+          currentXauUsdSpecialSignal = "BUY GOLD (USDX Strong)";
+        }
+
+        // ตรวจจับการเปลี่ยนแปลงและแจ้งเตือน
+        if (previousXauUsdSpecialSignal === null && subscribedChatId) {
+          // First run with subscriber
+          console.log(
+            `Initial special XAUUSD signal determined: ${currentXauUsdSpecialSignal}. Storing and awaiting next change.`
+          );
+          const initialSpecialMsg =
+            `*สัญญาณทองคำพิเศษเริ่มต้น (XAUUSD vs USDX):*\n` +
+            `${getEmojiForSignal(
+              currentXauUsdSpecialSignal
+            )} \`${currentXauUsdSpecialSignal}\`\n` +
+            `   XAUUSD avg: ${xauusdAvg.toFixed(2)}%\n` +
+            `   USDX avg: ${usdxAvg.toFixed(2)}%`;
+          // await sendTelegramNotification(initialSpecialMsg, true); // สามารถเปิดถ้าต้องการแจ้งเตือนรอบแรก
+        } else if (
+          previousXauUsdSpecialSignal !== null &&
+          currentXauUsdSpecialSignal !== previousXauUsdSpecialSignal
+        ) {
+          console.log(
+            `Special XAUUSD signal changed from ${previousXauUsdSpecialSignal} to ${currentXauUsdSpecialSignal}. Sending notification.`
+          );
+          const message =
+            `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
+              currentXauUsdSpecialSignal
+            )}\n` +
+            `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
+            `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
+            `   เงื่อนไข:\n` +
+            `     - XAUUSD Sentiment (ซื้อ): ${xauusdAvg.toFixed(2)}%\n` +
+            `     - USDX Sentiment (ซื้อ): ${usdxAvg.toFixed(2)}%`;
+          sendTelegramNotification(message);
+        }
+        previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
+      } else {
+        console.log(
+          "XAUUSD or USDX data not available for special signal processing."
+        );
+      }
+      // --- End Process Special XAUUSD Signal ---
     } else {
       console.log("Could not find 'pairs' data in the FXSSI response.");
       lastServerTimeText = "N/A (FXSSI API error)";
