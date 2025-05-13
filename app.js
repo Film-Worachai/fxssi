@@ -116,7 +116,7 @@ if (TELEGRAM_BOT_TOKEN) {
       responseMessage += `\n(Chat ID ก่อนหน้า: ${oldSubscribedChatId} จะไม่ได้รับการแจ้งเตือนแล้ว)`;
     }
     responseMessage += `\nผมจะส่งสรุปสัญญาณปัจจุบันให้ (หากมีข้อมูล) และจะแจ้งเตือนเมื่อมีการเปลี่ยนแปลงสำคัญครับ`;
-    bot.sendMessage(chatId, responseMessage);
+    // bot.sendMessage(chatId, responseMessage);
     console.log(
       `User ${userName} (Chat ID: ${chatId}) subscribed via /start command.`
     );
