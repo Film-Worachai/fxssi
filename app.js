@@ -7,32 +7,25 @@ const express = require("express");
 
 // --- Configuration ---
 const API_URL_FXSSI = "https://c.fxssi.com/api/current-ratios";
-const BASE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes for FXSSI fetch
+const BASE_INTERVAL_MS = 5 * 60 * 1000;
 const RANDOM_VARIATION_MS = 1 * 60 * 1000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CONFIG_FILE_PATH = "./telegram_subscriber.json";
 const WEBHOOK_PORT = process.env.PORT || 80;
-const WEBHOOK_CONFIRMATION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes to keep webhook signal for confirmation
 // --- End Configuration ---
 
 let bot;
 let subscribedChatId = null;
-let previousSignals = {}; // For FXSSI general signals
-let lastSuccessfulResults = []; // Last FXSSI general results
+let previousSignals = {};
+let lastSuccessfulResults = [];
 let lastServerTimeText = "N/A";
-let previousXauUsdSpecialSignal = null; // For FXSSI XAUUSD vs USDX special signal
+let previousXauUsdSpecialSignal = null;
 let jsonDataCacheForStartup = null;
-
-// --- State for Webhook Confirmation ---
-let pendingWebhookSignals = []; // Array to store webhook signals awaiting FXSSI confirmation
-// Structure: { id: string, timestamp: number, data: webhookDataJson, confirmed: boolean, fxssiSymbol: string }
-// --- End State ---
 
 // --- Express App Setup ---
 const app = express();
 app.use(express.text({ type: "*/*" }));
 
-// Helper to extract base symbol (e.g., "XAUUSD" from "EIGHTCAP:XAUUSD")
 function extractBaseSymbol(tickerId) {
   if (!tickerId) return null;
   const parts = tickerId.split(":");
@@ -53,14 +46,11 @@ app.post("/tw", (req, res) => {
     console.log("Parsed JSON Body:", webhookDataJson);
   } catch (error) {
     console.error("Error parsing Webhook body as JSON:", error.message);
-    if (subscribedChatId && bot) {
-      const errorMessage = `⚠️ *TradingView Webhook Error!*\n\nCould not parse incoming data.`;
-      sendTelegramNotification(errorMessage, true);
-    }
+    // No Telegram notification for parsing errors if we only notify on match
     return res.status(400).send("Webhook data could not be parsed as JSON.");
   }
 
-  res.status(200).send("Webhook processed successfully by Express server.");
+  res.status(200).send("Webhook processed successfully by Express server."); // Acknowledge TradingView
 
   if (webhookDataJson && webhookDataJson.symbol && webhookDataJson.signal) {
     const baseSymbolFromWebhook = extractBaseSymbol(webhookDataJson.symbol);
@@ -72,49 +62,70 @@ app.post("/tw", (req, res) => {
       return;
     }
 
-    const signalId = `${baseSymbolFromWebhook}_${webhookDataJson.signal}_${receivedAt}`;
-    pendingWebhookSignals.push({
-      id: signalId,
-      timestamp: receivedAt,
-      data: webhookDataJson,
-      confirmed: false,
-      fxssiSymbol: baseSymbolFromWebhook, // Store the cleaned symbol
-    });
-    console.log(
-      `Webhook signal for ${baseSymbolFromWebhook} (${webhookDataJson.signal}) added to pending list. ID: ${signalId}`
-    );
-
-    // Send initial notification about the TradingView signal
     const {
       symbol,
-      signal,
+      signal: webhookSignalType,
       timeframe,
       ob_bottom,
       ob_top,
       retest_price,
       alert_timestamp,
     } = webhookDataJson;
-    const signalEmoji = signal.toUpperCase().includes("BUY")
-      ? "📈"
-      : signal.toUpperCase().includes("SELL")
-      ? "📉"
-      : "🔔";
-    const signalAction = signal.replace("_RETEST", "");
-    const alertDate = new Date(Number(alert_timestamp)).toLocaleString(
-      "th-TH",
-      { timeZone: "Asia/Bangkok", hour12: false }
+
+    const latestFxssiDataForSymbol = lastSuccessfulResults.find(
+      (fxssi) => fxssi.symbol.toUpperCase() === baseSymbolFromWebhook
     );
 
-    const initialWebhookMessage =
-      `${signalEmoji} *TradingView: ${baseSymbolFromWebhook} ${signalAction} Potential!*\n\n` +
-      `*Symbol:* \`${symbol}\` (Base: \`${baseSymbolFromWebhook}\`)\n` +
-      `*Signal:* \`${signal}\`\n` +
-      `*Timeframe:* \`${timeframe}\`\n` +
-      `*Order Block:* \`${ob_bottom} - ${ob_top}\`\n` +
-      `*Retest Price:* \`${retest_price}\`\n` +
-      `*TV Alert Time:* \`${alertDate}\`\n\n` +
-      `⏳ _Awaiting FXSSI confirmation..._`;
-    sendTelegramNotification(initialWebhookMessage, true);
+    let fxssiMatch = false;
+    let confirmationMessage = ""; // Will only be built if there's a match
+
+    if (latestFxssiDataForSymbol) {
+      const fxssiOverallSignal = latestFxssiDataForSymbol.overallSignal;
+      const fxssiBuyPercentage = latestFxssiDataForSymbol.buyPercentage;
+
+      if (
+        fxssiOverallSignal === "BUY" &&
+        webhookSignalType.toUpperCase().startsWith("BUY")
+      ) {
+        fxssiMatch = true;
+      } else if (
+        fxssiOverallSignal === "SELL" &&
+        webhookSignalType.toUpperCase().startsWith("SELL")
+      ) {
+        fxssiMatch = true;
+      }
+
+      if (fxssiMatch) {
+        console.log(
+          `CONFIRMED (Immediate): FXSSI ${fxssiOverallSignal} for ${baseSymbolFromWebhook} matches Webhook ${webhookSignalType}`
+        );
+        const alertDateTV = new Date(Number(alert_timestamp)).toLocaleString(
+          "th-TH",
+          { timeZone: "Asia/Bangkok", hour12: false }
+        );
+        confirmationMessage =
+          `✅ *CONFIRMED SIGNAL: ${baseSymbolFromWebhook} ${fxssiOverallSignal}!*\n\n` +
+          `*TradingView Signal:* \`${webhookSignalType}\` (on \`${timeframe}\`)\n` +
+          `*FXSSI Sentiment (Current):* \`${fxssiOverallSignal}\` (Buyers: ${fxssiBuyPercentage.toFixed(
+            2
+          )}%)\n` +
+          `  _(FXSSI data as of: ${lastServerTimeText || "N/A"})_\n\n` +
+          `*Details from TradingView:*\n` +
+          `  Symbol: \`${symbol}\`\n` +
+          `  Order Block: \`${ob_bottom} - ${ob_top}\`\n` +
+          `  Retest Price: \`${retest_price}\`\n` +
+          `  TV Alert Time: \`${alertDateTV}\``;
+        sendTelegramNotification(confirmationMessage, true);
+      } else {
+        console.log(
+          `No Match: FXSSI ${fxssiOverallSignal} for ${baseSymbolFromWebhook} does NOT match Webhook ${webhookSignalType}. No notification sent.`
+        );
+      }
+    } else {
+      console.log(
+        `No FXSSI data available for ${baseSymbolFromWebhook} to confirm Webhook ${webhookSignalType}. No notification sent.`
+      );
+    }
   }
 });
 
@@ -129,9 +140,9 @@ function getEmojiForSignal(signal) {
   if (upperSignal.includes("BUY GOLD")) return "📈";
   if (upperSignal.includes("SELL GOLD")) return "📉";
   if (upperSignal.includes("HOLD GOLD")) return "⚖️";
-  if (upperSignal.includes("BUY")) return "📈"; // General BUY
-  if (upperSignal.includes("SELL")) return "📉"; // General SELL
-  if (upperSignal.includes("HOLD")) return "⚖️"; // General HOLD
+  if (upperSignal.includes("BUY")) return "📈";
+  if (upperSignal.includes("SELL")) return "📉";
+  if (upperSignal.includes("HOLD")) return "⚖️";
   return "❔";
 }
 
@@ -172,11 +183,9 @@ if (TELEGRAM_BOT_TOKEN) {
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
   console.log("Telegram Bot initialized and polling for messages.");
   loadSubscribedChatId();
-
   bot.setMyCommands([
     { command: "/start", description: "Start receiving alerts" },
   ]);
-
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     const oldSubscribedChatId = subscribedChatId;
@@ -226,17 +235,6 @@ async function sendTelegramNotification(message, isSpecialMessage = false) {
   if (!bot || !subscribedChatId) return;
   try {
     let finalMessage = message;
-    if (!isSpecialMessage) {
-      const timeString =
-        lastServerTimeText !== "N/A" && lastServerTimeText.includes(" ")
-          ? lastServerTimeText.split(" ")[1]
-          : new Date().toLocaleTimeString("th-TH", {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            });
-      finalMessage += `\n_(ข้อมูล Server FXSSI ณ: ${timeString})_`;
-    }
     await bot.sendMessage(subscribedChatId, finalMessage, {
       parse_mode: "Markdown",
     });
@@ -320,27 +318,11 @@ function handleTelegramSendError(error) {
   }
 }
 
-// Function to clean up old pending webhook signals
-function cleanupPendingWebhooks() {
-  const now = Date.now();
-  pendingWebhookSignals = pendingWebhookSignals.filter((signal) => {
-    if (now - signal.timestamp > WEBHOOK_CONFIRMATION_TIMEOUT_MS) {
-      console.log(
-        `Pending webhook signal ID ${signal.id} for ${signal.fxssiSymbol} timed out and removed.`
-      );
-      return false;
-    }
-    return true;
-  });
-}
-
 async function fetchDataAndProcessFxssi() {
   const fetchTime = new Date().toLocaleString("en-US", {
     timeZone: "Asia/Bangkok",
   });
   console.log(`\n[${fetchTime}] Fetching new data from FXSSI...`);
-
-  cleanupPendingWebhooks(); // Clean up old webhooks before fetching new FXSSI data
 
   try {
     const response = await axios.get(API_URL_FXSSI);
@@ -350,117 +332,47 @@ async function fetchDataAndProcessFxssi() {
     if (jsonData && jsonData.pairs) {
       lastServerTimeText = jsonData.server_time_text || "N/A";
       console.log(`FXSSI Data fetched. Server time: ${lastServerTimeText}`);
-      const currentRunResults = [];
+      const currentRunFxssiResults = [];
 
-      // --- Process General FXSSI Signals ---
       for (const pairSymbolFxssi in jsonData.pairs) {
-        // e.g., XAUUSD, EURUSD
         if (jsonData.pairs.hasOwnProperty(pairSymbolFxssi)) {
           const pairData = jsonData.pairs[pairSymbolFxssi];
           if (pairData && pairData.hasOwnProperty("average")) {
             const buyPercentage = parseFloat(pairData.average);
             if (isNaN(buyPercentage)) continue;
-            let overallSignalFxssi = "HOLD"; // FXSSI Overall Signal
-            if (buyPercentage > 55)
-              overallSignalFxssi =
-                "SELL"; // High buyers -> potential SELL (contrarian for FXSSI sentiment)
-            else if (buyPercentage < 45) overallSignalFxssi = "BUY"; // Low buyers -> potential BUY
-            currentRunResults.push({
-              symbol: pairSymbolFxssi.toUpperCase(), // Ensure uppercase for matching
+            let overallSignalFxssi = "HOLD";
+            if (buyPercentage > 55) overallSignalFxssi = "SELL";
+            else if (buyPercentage < 45) overallSignalFxssi = "BUY";
+            currentRunFxssiResults.push({
+              symbol: pairSymbolFxssi.toUpperCase(),
               buyPercentage: buyPercentage,
               overallSignal: overallSignalFxssi,
             });
-
-            // --- Check for Webhook Confirmation ---
-            const pendingSignalsForThisSymbol = pendingWebhookSignals.filter(
-              (pSignal) =>
-                pSignal.fxssiSymbol === pairSymbolFxssi.toUpperCase() &&
-                !pSignal.confirmed
-            );
-
-            for (const pendingSignal of pendingSignalsForThisSymbol) {
-              const webhookSignalType = pendingSignal.data.signal; // e.g., "BUY_RETEST", "SELL_RETEST"
-              let match = false;
-
-              if (
-                overallSignalFxssi === "BUY" &&
-                webhookSignalType.toUpperCase().startsWith("BUY")
-              ) {
-                match = true;
-              } else if (
-                overallSignalFxssi === "SELL" &&
-                webhookSignalType.toUpperCase().startsWith("SELL")
-              ) {
-                match = true;
-              }
-
-              if (match) {
-                console.log(
-                  `CONFIRMED: FXSSI ${overallSignalFxssi} for ${pairSymbolFxssi} matches Webhook ${webhookSignalType}`
-                );
-                const {
-                  symbol,
-                  timeframe,
-                  ob_bottom,
-                  ob_top,
-                  retest_price,
-                  alert_timestamp,
-                } = pendingSignal.data;
-                const alertDateTV = new Date(
-                  Number(alert_timestamp)
-                ).toLocaleString("th-TH", {
-                  timeZone: "Asia/Bangkok",
-                  hour12: false,
-                });
-
-                const confirmationMessage =
-                  `✅ *CONFIRMED SIGNAL: ${pairSymbolFxssi} ${overallSignalFxssi}!*\n\n` +
-                  `*TradingView Signal:* \`${webhookSignalType}\` (on \`${timeframe}\`)\n` +
-                  `*FXSSI Sentiment:* \`${overallSignalFxssi}\` (Buyers: ${buyPercentage.toFixed(
-                    2
-                  )}%)\n\n` +
-                  `*Details from TradingView:*\n` +
-                  `  Symbol: \`${symbol}\`\n` +
-                  `  Order Block: \`${ob_bottom} - ${ob_top}\`\n` +
-                  `  Retest Price: \`${retest_price}\`\n` +
-                  `  TV Alert Time: \`${alertDateTV}\`\n\n` +
-                  `_Signal confirmed by FXSSI at ${new Date().toLocaleTimeString(
-                    "th-TH",
-                    { timeZone: "Asia/Bangkok", hour12: false }
-                  )}_`;
-                sendTelegramNotification(confirmationMessage, true);
-                pendingSignal.confirmed = true; // Mark as confirmed
-              }
-            }
           }
         }
       }
-      // Remove confirmed signals from pending list
-      pendingWebhookSignals = pendingWebhookSignals.filter((s) => !s.confirmed);
+      lastSuccessfulResults = [...currentRunFxssiResults];
+      lastSuccessfulResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
 
-      currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
-      lastSuccessfulResults = [...currentRunResults];
-
-      // ... (rest of your FXSSI general signal change detection logic) ...
       const isFirstRunPopulatingGeneralSignals =
         Object.keys(previousSignals).length === 0;
       if (
         isFirstRunPopulatingGeneralSignals &&
         subscribedChatId &&
-        currentRunResults.length > 0
+        lastSuccessfulResults.length > 0
       ) {
         console.log(
           "First successful FXSSI data fetch. Sending initial general signals snapshot..."
         );
         await sendInitialSignalsSnapshot(
-          currentRunResults,
+          lastSuccessfulResults,
           "📊 สรุป Sentiment FXSSI (ข้อมูลแรก)",
           lastServerTimeText
         );
       }
       let generalChangesDetected = 0;
       if (!isFirstRunPopulatingGeneralSignals) {
-        currentRunResults.forEach((result) => {
+        lastSuccessfulResults.forEach((result) => {
           const lastOverallSignal = previousSignals[result.symbol];
           const currentOverallSignal = result.overallSignal;
           if (
@@ -479,17 +391,19 @@ async function fetchDataAndProcessFxssi() {
         });
       }
       const newPreviousSignals = {};
-      currentRunResults.forEach((result) => {
+      lastSuccessfulResults.forEach((result) => {
         newPreviousSignals[result.symbol] = result.overallSignal;
       });
       previousSignals = newPreviousSignals;
-      if (isFirstRunPopulatingGeneralSignals && currentRunResults.length > 0) {
+      if (
+        isFirstRunPopulatingGeneralSignals &&
+        lastSuccessfulResults.length > 0
+      ) {
         console.log(
           "Initial general FXSSI signal data populated. Monitoring for changes."
         );
       }
 
-      // ... (rest of your XAUUSD special signal logic) ...
       if (jsonData.pairs.XAUUSD?.average && jsonData.pairs.USDX?.average) {
         const xauusdAvg = parseFloat(jsonData.pairs.XAUUSD.average);
         const usdxAvg = parseFloat(jsonData.pairs.USDX.average);
@@ -547,9 +461,11 @@ async function fetchDataAndProcessFxssi() {
 
 // --- Initialization ---
 console.log(
-  "Initializing FXSSI Signal Monitor with TradingView Webhook Confirmation..."
+  "Initializing FXSSI Signal Monitor with Immediate Webhook Confirmation (Notify on Match Only)..."
 );
 if (TELEGRAM_BOT_TOKEN) {
+  fetchDataAndProcessFxssi();
+
   app
     .listen(WEBHOOK_PORT, () => {
       console.log(
@@ -577,9 +493,9 @@ if (TELEGRAM_BOT_TOKEN) {
         console.error(`Port ${WEBHOOK_PORT} is already in use.`);
       process.exit(1);
     });
-  fetchDataAndProcessFxssi();
+
   console.log(
-    "FXSSI Signal Monitor & Webhook Confirmation running. Press Ctrl+C to stop."
+    "FXSSI Signal Monitor & Immediate Webhook Confirmation running. Press Ctrl+C to stop."
   );
   if (!subscribedChatId)
     console.log("To receive Telegram notifications, send /start to your bot.");
