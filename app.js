@@ -3,40 +3,118 @@ require("dotenv").config();
 const axios = require("axios");
 const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
-const express = require("express"); // เพิ่ม Express
+const express = require("express");
 
 // --- Configuration ---
 const API_URL_FXSSI = "https://c.fxssi.com/api/current-ratios";
-const BASE_INTERVAL_MS = 5 * 60 * 1000;
+const BASE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes for FXSSI fetch
 const RANDOM_VARIATION_MS = 1 * 60 * 1000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CONFIG_FILE_PATH = "./telegram_subscriber.json";
-const WEBHOOK_PORT = process.env.PORT || 80; // Port สำหรับ Express Webhook
+const WEBHOOK_PORT = process.env.PORT || 80;
+const WEBHOOK_CONFIRMATION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes to keep webhook signal for confirmation
 // --- End Configuration ---
 
 let bot;
 let subscribedChatId = null;
-let previousSignals = {};
-let lastSuccessfulResults = [];
+let previousSignals = {}; // For FXSSI general signals
+let lastSuccessfulResults = []; // Last FXSSI general results
 let lastServerTimeText = "N/A";
-let previousXauUsdSpecialSignal = null; // <<-- เพิ่มตัวแปรสำหรับสัญญาณพิเศษ XAUUSD
+let previousXauUsdSpecialSignal = null; // For FXSSI XAUUSD vs USDX special signal
+let jsonDataCacheForStartup = null;
+
+// --- State for Webhook Confirmation ---
+let pendingWebhookSignals = []; // Array to store webhook signals awaiting FXSSI confirmation
+// Structure: { id: string, timestamp: number, data: webhookDataJson, confirmed: boolean, fxssiSymbol: string }
+// --- End State ---
 
 // --- Express App Setup ---
 const app = express();
 app.use(express.text({ type: "*/*" }));
 
+// Helper to extract base symbol (e.g., "XAUUSD" from "EIGHTCAP:XAUUSD")
+function extractBaseSymbol(tickerId) {
+  if (!tickerId) return null;
+  const parts = tickerId.split(":");
+  return parts.length > 1 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+}
+
 app.post("/tw", (req, res) => {
-  const webhookData = req.body;
-  console.log(`[${new Date().toLocaleString()}] Received Webhook on /tw:`);
-  console.log("Headers:", JSON.stringify(req.headers, null, 2));
-  console.log("Body:", webhookData);
+  const rawWebhookData = req.body;
+  const receivedAt = Date.now();
+  console.log(
+    `[${new Date(receivedAt).toLocaleString()}] Received Webhook on /tw:`
+  );
+  console.log("Raw Body:", rawWebhookData);
+
+  let webhookDataJson;
+  try {
+    webhookDataJson = JSON.parse(rawWebhookData);
+    console.log("Parsed JSON Body:", webhookDataJson);
+  } catch (error) {
+    console.error("Error parsing Webhook body as JSON:", error.message);
+    if (subscribedChatId && bot) {
+      const errorMessage = `⚠️ *TradingView Webhook Error!*\n\nCould not parse incoming data.`;
+      sendTelegramNotification(errorMessage, true);
+    }
+    return res.status(400).send("Webhook data could not be parsed as JSON.");
+  }
+
   res.status(200).send("Webhook processed successfully by Express server.");
-  if (subscribedChatId && bot) {
-    const telegramMessage =
-      `🔔 *TradingView Webhook Received!*\n\n` +
-      `\`\`\`\n${webhookData}\n\`\`\`\n` +
-      `_(Source: /tw endpoint)_`;
-    sendTelegramNotification(telegramMessage, true);
+
+  if (webhookDataJson && webhookDataJson.symbol && webhookDataJson.signal) {
+    const baseSymbolFromWebhook = extractBaseSymbol(webhookDataJson.symbol);
+    if (!baseSymbolFromWebhook) {
+      console.warn(
+        "Could not extract base symbol from webhook data:",
+        webhookDataJson.symbol
+      );
+      return;
+    }
+
+    const signalId = `${baseSymbolFromWebhook}_${webhookDataJson.signal}_${receivedAt}`;
+    pendingWebhookSignals.push({
+      id: signalId,
+      timestamp: receivedAt,
+      data: webhookDataJson,
+      confirmed: false,
+      fxssiSymbol: baseSymbolFromWebhook, // Store the cleaned symbol
+    });
+    console.log(
+      `Webhook signal for ${baseSymbolFromWebhook} (${webhookDataJson.signal}) added to pending list. ID: ${signalId}`
+    );
+
+    // Send initial notification about the TradingView signal
+    const {
+      symbol,
+      signal,
+      timeframe,
+      ob_bottom,
+      ob_top,
+      retest_price,
+      alert_timestamp,
+    } = webhookDataJson;
+    const signalEmoji = signal.toUpperCase().includes("BUY")
+      ? "📈"
+      : signal.toUpperCase().includes("SELL")
+      ? "📉"
+      : "🔔";
+    const signalAction = signal.replace("_RETEST", "");
+    const alertDate = new Date(Number(alert_timestamp)).toLocaleString(
+      "th-TH",
+      { timeZone: "Asia/Bangkok", hour12: false }
+    );
+
+    const initialWebhookMessage =
+      `${signalEmoji} *TradingView: ${baseSymbolFromWebhook} ${signalAction} Potential!*\n\n` +
+      `*Symbol:* \`${symbol}\` (Base: \`${baseSymbolFromWebhook}\`)\n` +
+      `*Signal:* \`${signal}\`\n` +
+      `*Timeframe:* \`${timeframe}\`\n` +
+      `*Order Block:* \`${ob_bottom} - ${ob_top}\`\n` +
+      `*Retest Price:* \`${retest_price}\`\n` +
+      `*TV Alert Time:* \`${alertDate}\`\n\n` +
+      `⏳ _Awaiting FXSSI confirmation..._`;
+    sendTelegramNotification(initialWebhookMessage, true);
   }
 });
 
@@ -48,21 +126,13 @@ app.get("/", (req, res) => {
 function getEmojiForSignal(signal) {
   if (!signal) return "❔";
   const upperSignal = signal.toUpperCase();
-  // <<-- เพิ่มการจัดการสำหรับสัญญาณทองคำพิเศษ
   if (upperSignal.includes("BUY GOLD")) return "📈";
   if (upperSignal.includes("SELL GOLD")) return "📉";
   if (upperSignal.includes("HOLD GOLD")) return "⚖️";
-  // -->>
-  switch (upperSignal) {
-    case "BUY":
-      return "📈";
-    case "SELL":
-      return "📉";
-    case "HOLD":
-      return "⚖️";
-    default:
-      return "❔";
-  }
+  if (upperSignal.includes("BUY")) return "📈"; // General BUY
+  if (upperSignal.includes("SELL")) return "📉"; // General SELL
+  if (upperSignal.includes("HOLD")) return "⚖️"; // General HOLD
+  return "❔";
 }
 
 function saveSubscribedChatId(chatId) {
@@ -103,69 +173,53 @@ if (TELEGRAM_BOT_TOKEN) {
   console.log("Telegram Bot initialized and polling for messages.");
   loadSubscribedChatId();
 
-  bot.setMyCommands([{ command: "/start", description: "start" }]);
+  bot.setMyCommands([
+    { command: "/start", description: "Start receiving alerts" },
+  ]);
 
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     const oldSubscribedChatId = subscribedChatId;
     subscribedChatId = chatId;
     saveSubscribedChatId(chatId);
-
     const userName = msg.from.first_name || "User";
-    let responseMessage = `สวัสดีครับคุณ ${userName}! คุณได้สมัครรับการแจ้งเตือน FXSSI signals และ TradingView Webhooks แล้ว`;
-
+    let responseMessage = `สวัสดีครับคุณ ${userName}! คุณได้สมัครรับการแจ้งเตือน FXSSI signals และ TradingView Webhooks แล้วครับ`;
     if (oldSubscribedChatId && oldSubscribedChatId !== chatId) {
       responseMessage += `\n(Chat ID ก่อนหน้า: ${oldSubscribedChatId} จะไม่ได้รับการแจ้งเตือนแล้ว)`;
     }
-    responseMessage += `\nผมจะส่งสรุปสัญญาณปัจจุบันให้ (หากมีข้อมูล) และจะแจ้งเตือนเมื่อมีการเปลี่ยนแปลงสำคัญครับ`;
-    // bot.sendMessage(chatId, responseMessage);
+    bot.sendMessage(chatId, responseMessage);
     console.log(
       `User ${userName} (Chat ID: ${chatId}) subscribed via /start command.`
     );
-
     if (lastSuccessfulResults.length > 0 && subscribedChatId) {
-      console.log(
-        "Sending current FXSSI signals snapshot to newly subscribed user..."
-      );
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
-        `📊 สรุป Sentiment FXSSI (/start)`,
+        `📊 สรุป Sentiment FXSSI (ข้อมูลล่าสุด)`,
         lastServerTimeText
       );
     }
-    // <<-- อาจจะส่งสถานะสัญญาณ XAUUSD พิเศษปัจจุบันให้ด้วยถ้าต้องการ
     if (previousXauUsdSpecialSignal && subscribedChatId) {
-      const xauAvg =
-        jsonDataCacheForStartup && jsonDataCacheForStartup.pairs.XAUUSD
-          ? parseFloat(jsonDataCacheForStartup.pairs.XAUUSD.average).toFixed(2)
-          : "N/A";
-      const usdxAvg =
-        jsonDataCacheForStartup && jsonDataCacheForStartup.pairs.USDX
-          ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
-          : "N/A";
-      const specialXauMessage =
-        `*🚀🚀 สถานะสัญญาณทองคำ (XAUUSD vs USDX) :*\n` +
-        `${getEmojiForSignal(
-          previousXauUsdSpecialSignal
-        )} \`${previousXauUsdSpecialSignal}\`\n` +
-        `   XAUUSD avg: ${xauAvg}%\n` +
-        `   USDX avg: ${usdxAvg}%`;
+      const xauAvg = jsonDataCacheForStartup?.pairs?.XAUUSD?.average
+        ? parseFloat(jsonDataCacheForStartup.pairs.XAUUSD.average).toFixed(2)
+        : "N/A";
+      const usdxAvg = jsonDataCacheForStartup?.pairs?.USDX?.average
+        ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
+        : "N/A";
+      const specialXauMessage = `*🚀 สัญญาณทองคำพิเศษ (XAUUSD vs USDX):*\n${getEmojiForSignal(
+        previousXauUsdSpecialSignal
+      )} \`${previousXauUsdSpecialSignal}\`\n   XAUUSD avg: ${xauAvg}%\n   USDX avg: ${usdxAvg}%`;
       sendTelegramNotification(specialXauMessage, true);
     }
-    // -->>
   });
-
-  bot.on("polling_error", (error) => {
+  bot.on("polling_error", (error) =>
     console.error(
       `Telegram polling error: ${error.code} - ${
         error.message ? error.message.substring(0, 150) : "(No message)"
       }`
-    );
-  });
-} else {
-  console.error(
-    "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set. Please create a .env file or set it as an environment variable."
+    )
   );
+} else {
+  console.error("CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set.");
 }
 
 async function sendTelegramNotification(message, isSpecialMessage = false) {
@@ -188,7 +242,10 @@ async function sendTelegramNotification(message, isSpecialMessage = false) {
     });
     const firstLine = message.split("\n")[0];
     console.log(
-      `Telegram notification sent to Chat ID ${subscribedChatId}: "${firstLine}"`
+      `Telegram notification sent to Chat ID ${subscribedChatId}: "${firstLine.substring(
+        0,
+        80
+      )}..."`
     );
   } catch (error) {
     handleTelegramSendError(error);
@@ -203,23 +260,15 @@ function padLeft(str, length, char = " ") {
 }
 
 async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
-  if (!bot || !subscribedChatId) return;
-  if (!signalsArray || signalsArray.length === 0) {
-    await sendTelegramNotification(
-      `*${title}*\n\nไม่มีข้อมูลสัญญาณในขณะนี้`,
-      true
-    );
+  if (!bot || !subscribedChatId || !signalsArray || signalsArray.length === 0)
     return;
-  }
   let message = `*${title}*\n\n`;
-  if (serverTimeText && serverTimeText !== "N/A") {
-    message += `_ข้อมูล ณ ${serverTimeText} (Server Time)_\n\n`;
-  } else {
-    const now = new Date();
-    message += `_ข้อมูล ณ ${now.toLocaleDateString(
-      "th-TH"
-    )} ${now.toLocaleTimeString("th-TH")} (Local Time)_\n\n`;
-  }
+  message +=
+    serverTimeText && serverTimeText !== "N/A"
+      ? `_ข้อมูล FXSSI ณ ${serverTimeText} (Server Time)_\n\n`
+      : `_ข้อมูล FXSSI ณ ${new Date().toLocaleDateString(
+          "th-TH"
+        )} ${new Date().toLocaleTimeString("th-TH")} (Local Time)_\n\n`;
   message += "```\n";
   const maxSymbolLength = Math.max(
     ...signalsArray.map((s) => s.symbol.length),
@@ -237,10 +286,11 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
   });
   message += "```\n";
   if (message.length > 4000) {
-    message = `*${title}*\n\nรายการสัญญาณยาวเกินไป.\n`;
-    if (serverTimeText && serverTimeText !== "N/A") {
-      message += `_ข้อมูล ณ ${serverTimeText} (Server Time)_`;
-    }
+    message =
+      `*${title}*\n\nรายการสัญญาณยาวเกินไป.\n` +
+      (serverTimeText && serverTimeText !== "N/A"
+        ? `_ข้อมูล FXSSI ณ ${serverTimeText} (Server Time)_`
+        : "");
   }
   await sendTelegramNotification(message.trim(), true);
 }
@@ -252,7 +302,7 @@ function handleTelegramSendError(error) {
       (error.response.body && error.response.body.error_code === 403))
   ) {
     console.warn(
-      `Failed to send Telegram notification to ${subscribedChatId}: Bot was blocked or kicked. Resetting subscription.`
+      `Failed to send Telegram notification to ${subscribedChatId}: Bot was blocked. Resetting subscription.`
     );
     subscribedChatId = null;
     try {
@@ -264,48 +314,134 @@ function handleTelegramSendError(error) {
     console.error(
       `Failed to send Telegram notification to ${subscribedChatId}:`,
       error.message
+        ? error.message.substring(0, 200)
+        : "Unknown Telegram send error"
     );
   }
 }
 
-let jsonDataCacheForStartup = null; // <<-- Cache jsonData for /start if needed
+// Function to clean up old pending webhook signals
+function cleanupPendingWebhooks() {
+  const now = Date.now();
+  pendingWebhookSignals = pendingWebhookSignals.filter((signal) => {
+    if (now - signal.timestamp > WEBHOOK_CONFIRMATION_TIMEOUT_MS) {
+      console.log(
+        `Pending webhook signal ID ${signal.id} for ${signal.fxssiSymbol} timed out and removed.`
+      );
+      return false;
+    }
+    return true;
+  });
+}
 
 async function fetchDataAndProcessFxssi() {
   const fetchTime = new Date().toLocaleString("en-US", {
     timeZone: "Asia/Bangkok",
   });
   console.log(`\n[${fetchTime}] Fetching new data from FXSSI...`);
+
+  cleanupPendingWebhooks(); // Clean up old webhooks before fetching new FXSSI data
+
   try {
     const response = await axios.get(API_URL_FXSSI);
     const jsonData = response.data;
-    jsonDataCacheForStartup = jsonData; // <<-- Cache for /start command
+    jsonDataCacheForStartup = jsonData;
 
     if (jsonData && jsonData.pairs) {
       lastServerTimeText = jsonData.server_time_text || "N/A";
       console.log(`FXSSI Data fetched. Server time: ${lastServerTimeText}`);
       const currentRunResults = [];
 
-      // --- Process General Signals (เดิม) ---
-      for (const pairSymbol in jsonData.pairs) {
-        if (jsonData.pairs.hasOwnProperty(pairSymbol)) {
-          const pairData = jsonData.pairs[pairSymbol];
+      // --- Process General FXSSI Signals ---
+      for (const pairSymbolFxssi in jsonData.pairs) {
+        // e.g., XAUUSD, EURUSD
+        if (jsonData.pairs.hasOwnProperty(pairSymbolFxssi)) {
+          const pairData = jsonData.pairs[pairSymbolFxssi];
           if (pairData && pairData.hasOwnProperty("average")) {
             const buyPercentage = parseFloat(pairData.average);
             if (isNaN(buyPercentage)) continue;
-            let overallSignal = "HOLD";
-            if (buyPercentage > 55) overallSignal = "SELL";
-            else if (buyPercentage < 45) overallSignal = "BUY";
+            let overallSignalFxssi = "HOLD"; // FXSSI Overall Signal
+            if (buyPercentage > 55)
+              overallSignalFxssi =
+                "SELL"; // High buyers -> potential SELL (contrarian for FXSSI sentiment)
+            else if (buyPercentage < 45) overallSignalFxssi = "BUY"; // Low buyers -> potential BUY
             currentRunResults.push({
-              symbol: pairSymbol,
+              symbol: pairSymbolFxssi.toUpperCase(), // Ensure uppercase for matching
               buyPercentage: buyPercentage,
-              overallSignal: overallSignal,
+              overallSignal: overallSignalFxssi,
             });
+
+            // --- Check for Webhook Confirmation ---
+            const pendingSignalsForThisSymbol = pendingWebhookSignals.filter(
+              (pSignal) =>
+                pSignal.fxssiSymbol === pairSymbolFxssi.toUpperCase() &&
+                !pSignal.confirmed
+            );
+
+            for (const pendingSignal of pendingSignalsForThisSymbol) {
+              const webhookSignalType = pendingSignal.data.signal; // e.g., "BUY_RETEST", "SELL_RETEST"
+              let match = false;
+
+              if (
+                overallSignalFxssi === "BUY" &&
+                webhookSignalType.toUpperCase().startsWith("BUY")
+              ) {
+                match = true;
+              } else if (
+                overallSignalFxssi === "SELL" &&
+                webhookSignalType.toUpperCase().startsWith("SELL")
+              ) {
+                match = true;
+              }
+
+              if (match) {
+                console.log(
+                  `CONFIRMED: FXSSI ${overallSignalFxssi} for ${pairSymbolFxssi} matches Webhook ${webhookSignalType}`
+                );
+                const {
+                  symbol,
+                  timeframe,
+                  ob_bottom,
+                  ob_top,
+                  retest_price,
+                  alert_timestamp,
+                } = pendingSignal.data;
+                const alertDateTV = new Date(
+                  Number(alert_timestamp)
+                ).toLocaleString("th-TH", {
+                  timeZone: "Asia/Bangkok",
+                  hour12: false,
+                });
+
+                const confirmationMessage =
+                  `✅ *CONFIRMED SIGNAL: ${pairSymbolFxssi} ${overallSignalFxssi}!*\n\n` +
+                  `*TradingView Signal:* \`${webhookSignalType}\` (on \`${timeframe}\`)\n` +
+                  `*FXSSI Sentiment:* \`${overallSignalFxssi}\` (Buyers: ${buyPercentage.toFixed(
+                    2
+                  )}%)\n\n` +
+                  `*Details from TradingView:*\n` +
+                  `  Symbol: \`${symbol}\`\n` +
+                  `  Order Block: \`${ob_bottom} - ${ob_top}\`\n` +
+                  `  Retest Price: \`${retest_price}\`\n` +
+                  `  TV Alert Time: \`${alertDateTV}\`\n\n` +
+                  `_Signal confirmed by FXSSI at ${new Date().toLocaleTimeString(
+                    "th-TH",
+                    { timeZone: "Asia/Bangkok", hour12: false }
+                  )}_`;
+                sendTelegramNotification(confirmationMessage, true);
+                pendingSignal.confirmed = true; // Mark as confirmed
+              }
+            }
           }
         }
       }
+      // Remove confirmed signals from pending list
+      pendingWebhookSignals = pendingWebhookSignals.filter((s) => !s.confirmed);
+
       currentRunResults.sort((a, b) => b.buyPercentage - a.buyPercentage);
       lastSuccessfulResults = [...currentRunResults];
 
+      // ... (rest of your FXSSI general signal change detection logic) ...
       const isFirstRunPopulatingGeneralSignals =
         Object.keys(previousSignals).length === 0;
       if (
@@ -318,11 +454,10 @@ async function fetchDataAndProcessFxssi() {
         );
         await sendInitialSignalsSnapshot(
           currentRunResults,
-          "📊 สรุป Sentiment FXSSI (/start)",
+          "📊 สรุป Sentiment FXSSI (ข้อมูลแรก)",
           lastServerTimeText
         );
       }
-
       let generalChangesDetected = 0;
       if (!isFirstRunPopulatingGeneralSignals) {
         currentRunResults.forEach((result) => {
@@ -334,14 +469,12 @@ async function fetchDataAndProcessFxssi() {
           ) {
             generalChangesDetected++;
             const sentimentBuyBase = result.buyPercentage.toFixed(2);
-            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2);
-            const message =
-              `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
-                currentOverallSignal
-              )}\n` +
-              `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`;
-            sendTelegramNotification(message);
+            const message = `🔔 *${
+              result.symbol
+            } FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
+              currentOverallSignal
+            )}\n   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n   Sentiment (ผู้ซื้อ): ${sentimentBuyBase}%`;
+            sendTelegramNotification(message, false);
           }
         });
       }
@@ -354,62 +487,39 @@ async function fetchDataAndProcessFxssi() {
         console.log(
           "Initial general FXSSI signal data populated. Monitoring for changes."
         );
-      } else if (
-        generalChangesDetected === 0 &&
-        !isFirstRunPopulatingGeneralSignals
-      ) {
-        // console.log("No significant general FXSSI signal changes detected.");
       }
-      // --- End Process General Signals ---
 
-      // --- Process Special XAUUSD Signal (ใหม่) ---
-      if (
-        jsonData.pairs.XAUUSD &&
-        jsonData.pairs.XAUUSD.average &&
-        jsonData.pairs.USDX &&
-        jsonData.pairs.USDX.average
-      ) {
+      // ... (rest of your XAUUSD special signal logic) ...
+      if (jsonData.pairs.XAUUSD?.average && jsonData.pairs.USDX?.average) {
         const xauusdAvg = parseFloat(jsonData.pairs.XAUUSD.average);
         const usdxAvg = parseFloat(jsonData.pairs.USDX.average);
         let currentXauUsdSpecialSignal = "HOLD GOLD";
+        if (xauusdAvg < 45 && usdxAvg < 50)
+          currentXauUsdSpecialSignal =
+            "BUY GOLD (XAU Low Buyers, USDX Neutral/Weak)";
+        else if (xauusdAvg > 55 && usdxAvg > 50)
+          currentXauUsdSpecialSignal =
+            "SELL GOLD (XAU High Buyers, USDX Strong)";
+        else if (xauusdAvg < 45)
+          currentXauUsdSpecialSignal = "Consider BUY GOLD (XAU Low Buyers)";
+        else if (xauusdAvg > 55)
+          currentXauUsdSpecialSignal = "Consider SELL GOLD (XAU High Buyers)";
 
-        if (xauusdAvg > 55 && usdxAvg < 50) {
-          currentXauUsdSpecialSignal = "SELL GOLD (USDX Weak)";
-        } else if (xauusdAvg < 45 && usdxAvg > 50) {
-          currentXauUsdSpecialSignal = "BUY GOLD (USDX Strong)";
-        }
-
-        // ตรวจจับการเปลี่ยนแปลงและแจ้งเตือน
         if (previousXauUsdSpecialSignal === null && subscribedChatId) {
-          // First run with subscriber
-          console.log(
-            `Initial special XAUUSD signal determined: ${currentXauUsdSpecialSignal}. Storing and awaiting next change.`
-          );
-          const initialSpecialMsg =
-            `*สัญญาณทองคำพิเศษเริ่มต้น (XAUUSD vs USDX):*\n` +
-            `${getEmojiForSignal(
-              currentXauUsdSpecialSignal
-            )} \`${currentXauUsdSpecialSignal}\`\n` +
-            `   XAUUSD avg: ${xauusdAvg.toFixed(2)}%\n` +
-            `   USDX avg: ${usdxAvg.toFixed(2)}%`;
-          // await sendTelegramNotification(initialSpecialMsg, true); // สามารถเปิดถ้าต้องการแจ้งเตือนรอบแรก
+          /* console.log(`Initial special XAUUSD signal: ${currentXauUsdSpecialSignal}`); */
         } else if (
           previousXauUsdSpecialSignal !== null &&
           currentXauUsdSpecialSignal !== previousXauUsdSpecialSignal
         ) {
           console.log(
-            `Special XAUUSD signal changed from ${previousXauUsdSpecialSignal} to ${currentXauUsdSpecialSignal}. Sending notification.`
+            `Special XAUUSD signal changed: ${currentXauUsdSpecialSignal}. Sending notification.`
           );
-          const message =
-            `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
-              currentXauUsdSpecialSignal
-            )}\n` +
-            `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
-            `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
-            `   เงื่อนไข:\n` +
-            `     - XAUUSD Sentiment (ซื้อ): ${xauusdAvg.toFixed(2)}%\n` +
-            `     - USDX Sentiment (ซื้อ): ${usdxAvg.toFixed(2)}%`;
-          sendTelegramNotification(message);
+          const message = `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
+            currentXauUsdSpecialSignal
+          )}\n   จาก: \`${previousXauUsdSpecialSignal}\`\n   เป็น: \`${currentXauUsdSpecialSignal}\`\n   ข้อมูล:\n     - XAUUSD Sentiment (ผู้ซื้อ): ${xauusdAvg.toFixed(
+            2
+          )}%\n     - USDX Sentiment (ผู้ซื้อ): ${usdxAvg.toFixed(2)}%`;
+          sendTelegramNotification(message, true);
         }
         previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
       } else {
@@ -417,7 +527,6 @@ async function fetchDataAndProcessFxssi() {
           "XAUUSD or USDX data not available for special signal processing."
         );
       }
-      // --- End Process Special XAUUSD Signal ---
     } else {
       console.log("Could not find 'pairs' data in the FXSSI response.");
       lastServerTimeText = "N/A (FXSSI API error)";
@@ -425,7 +534,7 @@ async function fetchDataAndProcessFxssi() {
   } catch (error) {
     console.error(
       "Error during FXSSI data fetch or processing:",
-      error.message
+      error.message ? error.message.substring(0, 200) : "Unknown FXSSI error"
     );
     lastServerTimeText = "N/A (FXSSI Fetch error)";
   } finally {
@@ -437,46 +546,50 @@ async function fetchDataAndProcessFxssi() {
 }
 
 // --- Initialization ---
-console.log("Initializing FXSSI Signal Monitor with Webhook...");
-
+console.log(
+  "Initializing FXSSI Signal Monitor with TradingView Webhook Confirmation..."
+);
 if (TELEGRAM_BOT_TOKEN) {
   app
     .listen(WEBHOOK_PORT, () => {
       console.log(
         `Express server with Webhook listening on port ${WEBHOOK_PORT}`
       );
-      console.log(
-        `Webhook endpoint: http://localhost:${WEBHOOK_PORT}/tw (POST)`
-      );
+      axios
+        .get("https://api.ipify.org?format=json")
+        .then((response) =>
+          console.log(
+            `Webhook endpoint accessible at: http://${response.data.ip}:${WEBHOOK_PORT}/tw (POST)`
+          )
+        )
+        .catch(() =>
+          console.log(
+            `Webhook endpoint: http://<YOUR_PUBLIC_IP>:${WEBHOOK_PORT}/tw (POST) or http://localhost:${WEBHOOK_PORT}/tw`
+          )
+        );
     })
     .on("error", (err) => {
       console.error(
         `Failed to start Express server on port ${WEBHOOK_PORT}:`,
         err.message
       );
-      if (err.code === "EADDRINUSE") {
-        console.error(
-          `Port ${WEBHOOK_PORT} is already in use. Please choose another port or stop the existing service.`
-        );
-      }
+      if (err.code === "EADDRINUSE")
+        console.error(`Port ${WEBHOOK_PORT} is already in use.`);
       process.exit(1);
     });
-
   fetchDataAndProcessFxssi();
-  console.log("FXSSI Signal Monitor part is running. Press Ctrl+C to stop.");
-
-  if (!subscribedChatId) {
+  console.log(
+    "FXSSI Signal Monitor & Webhook Confirmation running. Press Ctrl+C to stop."
+  );
+  if (!subscribedChatId)
+    console.log("To receive Telegram notifications, send /start to your bot.");
+  else
     console.log(
-      "To receive Telegram notifications, send the /start command to your bot on Telegram."
+      `Subscribed to send notifications to Chat ID: ${subscribedChatId}.`
     );
-  } else {
-    console.log(
-      `Currently subscribed to send notifications to Chat ID: ${subscribedChatId}.`
-    );
-  }
 } else {
   console.error(
-    "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set. FXSSI Monitor and Telegram Bot cannot start."
+    "CRITICAL ERROR: TELEGRAM_BOT_TOKEN is not set. Application cannot start."
   );
   process.exit(1);
 }
