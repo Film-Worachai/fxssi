@@ -196,14 +196,14 @@ if (TELEGRAM_BOT_TOKEN) {
     if (oldSubscribedChatId && oldSubscribedChatId !== chatId) {
       responseMessage += `\n(Chat ID ก่อนหน้า: ${oldSubscribedChatId} จะไม่ได้รับการแจ้งเตือนแล้ว)`;
     }
-    bot.sendMessage(chatId, responseMessage);
+    // bot.sendMessage(chatId, responseMessage);
     console.log(
       `User ${userName} (Chat ID: ${chatId}) subscribed via /start command.`
     );
     if (lastSuccessfulResults.length > 0 && subscribedChatId) {
       sendInitialSignalsSnapshot(
         lastSuccessfulResults,
-        `📊 สรุป Sentiment FXSSI (ข้อมูลล่าสุด)`,
+        `📊 สรุป Sentiment FXSSI (/start)`,
         lastServerTimeText
       );
     }
@@ -214,7 +214,7 @@ if (TELEGRAM_BOT_TOKEN) {
       const usdxAvg = jsonDataCacheForStartup?.pairs?.USDX?.average
         ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
         : "N/A";
-      const specialXauMessage = `*🚀 สัญญาณทองคำพิเศษ (XAUUSD vs USDX):*\n${getEmojiForSignal(
+      const specialXauMessage = `*🚀 สัญญาณทองคำ (XAUUSD vs USDX):*\n${getEmojiForSignal(
         previousXauUsdSpecialSignal
       )} \`${previousXauUsdSpecialSignal}\`\n   XAUUSD avg: ${xauAvg}%\n   USDX avg: ${usdxAvg}%`;
       sendTelegramNotification(specialXauMessage, true);
@@ -366,7 +366,7 @@ async function fetchDataAndProcessFxssi() {
         );
         await sendInitialSignalsSnapshot(
           lastSuccessfulResults,
-          "📊 สรุป Sentiment FXSSI (ข้อมูลแรก)",
+          "📊 สรุป Sentiment FXSSI (/start)",
           lastServerTimeText
         );
       }
@@ -428,7 +428,7 @@ async function fetchDataAndProcessFxssi() {
           console.log(
             `Special XAUUSD signal changed: ${currentXauUsdSpecialSignal}. Sending notification.`
           );
-          const message = `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
+          const message = `🔔 *XAUUSD สัญญาณ เปลี่ยนแปลง!* ${getEmojiForSignal(
             currentXauUsdSpecialSignal
           )}\n   จาก: \`${previousXauUsdSpecialSignal}\`\n   เป็น: \`${currentXauUsdSpecialSignal}\`\n   ข้อมูล:\n     - XAUUSD Sentiment (ผู้ซื้อ): ${xauusdAvg.toFixed(
             2
