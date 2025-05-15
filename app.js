@@ -103,7 +103,7 @@ app.post("/tw", (req, res) => {
           { timeZone: "Asia/Bangkok", hour12: false }
         );
         confirmationMessage =
-          `✅ *CONFIRMED SIGNAL: ${baseSymbolFromWebhook} ${fxssiOverallSignal}!*\n\n` +
+          `✅ *CONFIRMED SIGNAL: \n\n${baseSymbolFromWebhook} ${fxssiOverallSignal}!*\n\n` +
           `*TradingView Signal:* \`${webhookSignalType}\` (on \`${timeframe}\`)\n` +
           `*FXSSI Sentiment (Current):* \`${fxssiOverallSignal}\` (Buyers: ${fxssiBuyPercentage.toFixed(
             2
@@ -217,9 +217,13 @@ if (TELEGRAM_BOT_TOKEN) {
       const usdxAvg = jsonDataCacheForStartup?.pairs?.USDX?.average
         ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
         : "N/A";
-      const specialXauMessage = `*🚀 สัญญาณทองคำ (XAUUSD vs USDX):*\n${getEmojiForSignal(
-        previousXauUsdSpecialSignal
-      )} \`${previousXauUsdSpecialSignal}\`\n   XAUUSD avg: ${xauAvg}%\n   USDX avg: ${usdxAvg}%`;
+      const specialXauMessage =
+        `*🚀🚀 สถานะสัญญาณทองคำ (XAUUSD vs USDX) :*\n` +
+        `${getEmojiForSignal(
+          previousXauUsdSpecialSignal
+        )} \`${previousXauUsdSpecialSignal}\`\n` +
+        `   XAUUSD avg: ${xauAvg}%\n` +
+        `   USDX avg: ${usdxAvg}%`;
       sendTelegramNotification(specialXauMessage, true); // true for special message
     }
   });
@@ -358,9 +362,8 @@ async function fetchDataAndProcessFxssi() {
             if (isNaN(buyPercentage)) continue; // Skip if average is not a number
 
             let overallSignalFxssi = "HOLD";
-            if (buyPercentage > 55)
-              overallSignalFxssi =
-                "SELL"; // Note: FXSSI 'average' is BUY percentage. So >55 means more buyers -> potential SELL signal for contrarian. Or BUY for trend. Adjust as per your strategy. This example uses it as BUY percentage.
+            if (buyPercentage > 55) overallSignalFxssi = "SELL";
+            // Note: FXSSI 'average' is BUY percentage. So >55 means more buyers -> potential SELL signal for contrarian. Or BUY for trend. Adjust as per your strategy. This example uses it as BUY percentage.
             else if (buyPercentage < 45) overallSignalFxssi = "BUY"; // <45 means fewer buyers -> potential BUY signal for contrarian.
 
             currentRunFxssiResults.push({
@@ -468,11 +471,15 @@ async function fetchDataAndProcessFxssi() {
           console.log(
             `Special XAUUSD signal changed: ${currentXauUsdSpecialSignal}. Sending notification.`
           );
-          const message = `🔔 *XAUUSD สัญญาณ เปลี่ยนแปลง!* ${getEmojiForSignal(
-            currentXauUsdSpecialSignal
-          )}\n   จาก: \`${previousXauUsdSpecialSignal}\`\n   เป็น: \`${currentXauUsdSpecialSignal}\`\n   ข้อมูล:\n     - XAUUSD Sentiment (ผู้ซื้อ): ${xauusdAvg.toFixed(
-            2
-          )}%\n     - USDX Sentiment (ผู้ซื้อ): ${usdxAvg.toFixed(2)}%`;
+          const message =
+            `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
+              currentXauUsdSpecialSignal
+            )}\n` +
+            `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
+            `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
+            `   เงื่อนไข:\n` +
+            `     - XAUUSD Sentiment (ซื้อ): ${xauusdAvg.toFixed(2)}%\n` +
+            `     - USDX Sentiment (ซื้อ): ${usdxAvg.toFixed(2)}%`;
           sendTelegramNotification(message, true); // true for special message
         }
         previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
