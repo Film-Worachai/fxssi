@@ -229,8 +229,8 @@ if (TELEGRAM_BOT_TOKEN) {
         const usdxSellFormatted = (100 - usdxAvg).toFixed(2);
 
         specialXauMessage +=
-          `\n   XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauBuyFormatted}% | ขาย: ${xauSellFormatted}%)` +
-          `\n   USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
+          `\n   XAUUSD (B: ${xauBuyFormatted} | S: ${xauSellFormatted})` +
+          `\n   USDX   (B: ${usdxBuyFormatted} | S: ${usdxSellFormatted})`;
       } else {
         specialXauMessage += `\n   (Detailed sentiment data currently unavailable)`;
       }
@@ -423,7 +423,7 @@ async function fetchDataAndProcessFxssi() {
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`; // Added %
+              `   Sentiment : (ฺB: ${sentimentBuyBase} | S: ${sentimentSellBase})`; // Added %
             sendTelegramNotification(message, false); // false for regular change
           }
         });
@@ -481,8 +481,8 @@ async function fetchDataAndProcessFxssi() {
             `*🚀 สัญญาณทองคำ (XAUUSD vs USDX) เริ่มต้น:*\n${getEmojiForSignal(
               currentXauUsdSpecialSignal
             )}\`${currentXauUsdSpecialSignal}\`\n` +
-            `   XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauusdBuyFormatted}% | ขาย: ${xauusdSellFormatted}%)\n` +
-            `   USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
+            `   XAUUSD : (B: ${xauusdBuyFormatted} | S: ${xauusdSellFormatted})\n` +
+            `   USDX   : (B: ${usdxBuyFormatted} | S: ${usdxSellFormatted})`;
           sendTelegramNotification(message, true); // true for special message
         } else if (
           previousXauUsdSpecialSignal !== null &&
@@ -499,8 +499,8 @@ async function fetchDataAndProcessFxssi() {
             `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
             `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
             `   เงื่อนไข:\n` + // "เงื่อนไข:" (Conditions:) label kept for clarity
-            `     - XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauusdBuyFormatted}% | ขาย: ${xauusdSellFormatted}%)\n` +
-            `     - USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
+            `     - XAUUSD : (B: ${xauusdBuyFormatted} | S: ${xauusdSellFormatted}%)\n` +
+            `     - USDX   : (B: ${usdxBuyFormatted} | S: ${usdxSellFormatted}%)`;
           sendTelegramNotification(message, true); // true for special message
         }
         previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
