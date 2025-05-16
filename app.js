@@ -306,7 +306,7 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
 
     message += `${getEmojiForSignal(
       s.overallSignal
-    )} ${symbolPadded} (B:${buyStr}% | S:${sellStr}%)\n`; // Added % sign here for consistency with other parts
+    )} ${symbolPadded} (B:${buyStr} | S:${sellStr})\n`; // Added % sign here for consistency with other parts
   });
   message += "```\n";
 
@@ -499,8 +499,8 @@ async function fetchDataAndProcessFxssi() {
             `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
             `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
             `   เงื่อนไข:\n` + // "เงื่อนไข:" (Conditions:) label kept for clarity
-            `     - XAUUSD : (B: ${xauusdBuyFormatted} | S: ${xauusdSellFormatted}%)\n` +
-            `     - USDX   : (B: ${usdxBuyFormatted} | S: ${usdxSellFormatted}%)`;
+            `     - XAUUSD : (B: ${xauusdBuyFormatted} | S: ${xauusdSellFormatted})\n` +
+            `     - USDX   : (B: ${usdxBuyFormatted} | S: ${usdxSellFormatted})`;
           sendTelegramNotification(message, true); // true for special message
         }
         previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
