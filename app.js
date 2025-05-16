@@ -196,7 +196,7 @@ if (TELEGRAM_BOT_TOKEN) {
       responseMessage += `\n(Chat ID ก่อนหน้า: ${oldSubscribedChatId} จะไม่ได้รับการแจ้งเตือนแล้ว)`;
     }
     // Send welcome message - you can uncomment this if you want an explicit welcome message
-    // bot.sendMessage(chatId, responseMessage);
+    // bot.sendMessage(chatId, responseMessage); // This is the welcome message, you can send it if you want
     console.log(
       `User ${userName} (Chat ID: ${chatId}) subscribed via /start command.`
     );
@@ -211,19 +211,29 @@ if (TELEGRAM_BOT_TOKEN) {
     }
     // Send current XAUUSD special signal if available
     if (previousXauUsdSpecialSignal && subscribedChatId) {
-      const xauAvg = jsonDataCacheForStartup?.pairs?.XAUUSD?.average
-        ? parseFloat(jsonDataCacheForStartup.pairs.XAUUSD.average).toFixed(2)
-        : "N/A";
-      const usdxAvg = jsonDataCacheForStartup?.pairs?.USDX?.average
-        ? parseFloat(jsonDataCacheForStartup.pairs.USDX.average).toFixed(2)
-        : "N/A";
-      const specialXauMessage =
+      let specialXauMessage =
         `*🚀🚀 สถานะสัญญาณทองคำ (XAUUSD vs USDX) :*\n` +
         `${getEmojiForSignal(
           previousXauUsdSpecialSignal
-        )} \`${previousXauUsdSpecialSignal}\`\n` +
-        `   XAUUSD avg: ${xauAvg}%\n` +
-        `   USDX avg: ${usdxAvg}%`;
+        )} \`${previousXauUsdSpecialSignal}\``;
+
+      if (
+        jsonDataCacheForStartup?.pairs?.XAUUSD?.average &&
+        jsonDataCacheForStartup?.pairs?.USDX?.average
+      ) {
+        const xauAvg = parseFloat(jsonDataCacheForStartup.pairs.XAUUSD.average);
+        const usdxAvg = parseFloat(jsonDataCacheForStartup.pairs.USDX.average);
+        const xauBuyFormatted = xauAvg.toFixed(2);
+        const xauSellFormatted = (100 - xauAvg).toFixed(2);
+        const usdxBuyFormatted = usdxAvg.toFixed(2);
+        const usdxSellFormatted = (100 - usdxAvg).toFixed(2);
+
+        specialXauMessage +=
+          `\n   XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauBuyFormatted}% | ขาย: ${xauSellFormatted}%)` +
+          `\n   USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
+      } else {
+        specialXauMessage += `\n   (Detailed sentiment data currently unavailable)`;
+      }
       sendTelegramNotification(specialXauMessage, true); // true for special message
     }
   });
@@ -296,7 +306,7 @@ async function sendInitialSignalsSnapshot(signalsArray, title, serverTimeText) {
 
     message += `${getEmojiForSignal(
       s.overallSignal
-    )} ${symbolPadded} (B:${buyStr} | S:${sellStr})\n`;
+    )} ${symbolPadded} (B:${buyStr}% | S:${sellStr}%)\n`; // Added % sign here for consistency with other parts
   });
   message += "```\n";
 
@@ -413,7 +423,7 @@ async function fetchDataAndProcessFxssi() {
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`;
+              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`; // Added %
             sendTelegramNotification(message, false); // false for regular change
           }
         });
@@ -455,16 +465,24 @@ async function fetchDataAndProcessFxssi() {
         }
         // --- END OF NEW LOGIC ---
 
+        // Calculate sell percentages and format all percentages
+        const xauusdBuyFormatted = xauusdAvg.toFixed(2);
+        const xauusdSellFormatted = (100 - xauusdAvg).toFixed(2); // Calculate XAUUSD sell %
+        const usdxBuyFormatted = usdxAvg.toFixed(2);
+        const usdxSellFormatted = (100 - usdxAvg).toFixed(2); // Calculate USDX sell %
+
         if (previousXauUsdSpecialSignal === null && subscribedChatId) {
           // First run with a subscriber, send initial special signal
           console.log(
             `Initial special XAUUSD signal: ${currentXauUsdSpecialSignal}. Sending notification.`
           );
-          const message = `*🚀 สัญญาณทองคำ (XAUUSD vs USDX) เริ่มต้น:*\n${getEmojiForSignal(
-            currentXauUsdSpecialSignal
-          )}\`${currentXauUsdSpecialSignal}\`\n   XAUUSD avg: ${xauusdAvg.toFixed(
-            2
-          )}%\n   USDX avg: ${usdxAvg.toFixed(2)}%`;
+          // MODIFIED MESSAGE FORMAT HERE
+          const message =
+            `*🚀 สัญญาณทองคำ (XAUUSD vs USDX) เริ่มต้น:*\n${getEmojiForSignal(
+              currentXauUsdSpecialSignal
+            )}\`${currentXauUsdSpecialSignal}\`\n` +
+            `   XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauusdBuyFormatted}% | ขาย: ${xauusdSellFormatted}%)\n` +
+            `   USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
           sendTelegramNotification(message, true); // true for special message
         } else if (
           previousXauUsdSpecialSignal !== null &&
@@ -473,15 +491,16 @@ async function fetchDataAndProcessFxssi() {
           console.log(
             `Special XAUUSD signal changed: ${currentXauUsdSpecialSignal}. Sending notification.`
           );
+          // MODIFIED MESSAGE FORMAT HERE
           const message =
             `🔔 *XAUUSD สัญญาณพิเศษ เปลี่ยนแปลง!* ${getEmojiForSignal(
               currentXauUsdSpecialSignal
             )}\n` +
             `   จาก: \`${previousXauUsdSpecialSignal}\`\n` +
             `   เป็น: \`${currentXauUsdSpecialSignal}\`\n` +
-            `   เงื่อนไข:\n` +
-            `     - XAUUSD Sentiment (ซื้อ): ${xauusdAvg.toFixed(2)}%\n` +
-            `     - USDX Sentiment (ซื้อ): ${usdxAvg.toFixed(2)}%`;
+            `   เงื่อนไข:\n` + // "เงื่อนไข:" (Conditions:) label kept for clarity
+            `     - XAUUSD Sentiment (ฐาน): (ซื้อ: ${xauusdBuyFormatted}% | ขาย: ${xauusdSellFormatted}%)\n` +
+            `     - USDX Sentiment (ฐาน): (ซื้อ: ${usdxBuyFormatted}% | ขาย: ${usdxSellFormatted}%)`;
           sendTelegramNotification(message, true); // true for special message
         }
         previousXauUsdSpecialSignal = currentXauUsdSpecialSignal;
