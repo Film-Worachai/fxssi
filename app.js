@@ -103,7 +103,7 @@ app.post("/tw", (req, res) => {
           { timeZone: "Asia/Bangkok", hour12: false }
         );
         confirmationMessage =
-          `✅ *CONFIRMED SIGNAL: \n\n${baseSymbolFromWebhook} ${fxssiOverallSignal}!*\n\n` +
+          `${baseSymbolFromWebhook} ${fxssiOverallSignal}!*\n\n✅ *CONFIRMED SIGNAL: \n\n` +
           `*TradingView Signal:* \`${webhookSignalType}\` (on \`${timeframe}\`)\n` +
           `*FXSSI Sentiment (Current):* \`${fxssiOverallSignal}\` (Buyers: ${fxssiBuyPercentage.toFixed(
             2
@@ -391,7 +391,7 @@ async function fetchDataAndProcessFxssi() {
         );
         await sendInitialSignalsSnapshot(
           lastSuccessfulResults,
-          "📊 สรุป Sentiment FXSSI (ครั้งแรก)", // Title for first snapshot
+          "📊 สรุป Sentiment FXSSI (/start)", // Title for first snapshot
           lastServerTimeText
         );
       }
@@ -407,11 +407,13 @@ async function fetchDataAndProcessFxssi() {
           ) {
             generalChangesDetected++;
             const sentimentBuyBase = result.buyPercentage.toFixed(2);
-            const message = `🔔 *${
-              result.symbol
-            } FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
-              currentOverallSignal
-            )}\n   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n   Sentiment (ผู้ซื้อ): ${sentimentBuyBase}%`;
+            const sentimentSellBase = (100 - result.buyPercentage).toFixed(2);
+            const message =
+              `🔔 *${result.symbol} FXSSI เปลี่ยนแปลง!* ${getEmojiForSignal(
+                currentOverallSignal
+              )}\n` +
+              `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
+              `   Sentiment (ฐาน): (ซื้อ: ${sentimentBuyBase}% | ขาย: ${sentimentSellBase}%)`;
             sendTelegramNotification(message, false); // false for regular change
           }
         });
