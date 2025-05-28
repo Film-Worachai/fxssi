@@ -423,7 +423,7 @@ async function fetchDataAndProcessFxssi() {
                 currentOverallSignal
               )}\n` +
               `   จาก: \`${lastOverallSignal}\`  เป็น: \`${currentOverallSignal}\`\n` +
-              `   Sentiment : (ฺB: ${sentimentBuyBase} | S: ${sentimentSellBase})`; // Added %
+              `   Sentiment : (B: ${sentimentBuyBase} | S: ${sentimentSellBase})`; // Added %
             sendTelegramNotification(message, false); // false for regular change
           }
         });
