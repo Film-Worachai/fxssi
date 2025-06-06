@@ -6,13 +6,6 @@ const fs = require("fs");
 const express = require("express");
 
 const { createProxyMiddleware } = require("http-proxy-middleware");
-app.use(
-  "/oauth2callback",
-  createProxyMiddleware({
-    target: "http://localhost:3000",
-    changeOrigin: true,
-  })
-);
 
 // --- Configuration ---
 const API_URL_FXSSI = "https://c.fxssi.com/api/current-ratios";
@@ -33,6 +26,15 @@ let jsonDataCacheForStartup = null; // Caches the last jsonData for /start comma
 
 // --- Express App Setup ---
 const app = express();
+
+app.use(
+  "/oauth2callback",
+  createProxyMiddleware({
+    target: "http://localhost:3000",
+    changeOrigin: true,
+  })
+);
+
 app.use(express.text({ type: "*/*" })); // Accept raw text body for webhook
 
 function extractBaseSymbol(tickerId) {
