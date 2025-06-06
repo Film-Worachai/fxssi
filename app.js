@@ -5,6 +5,17 @@ const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
 const express = require("express");
 
+const http = require("http");
+const httpProxy = require("http-proxy");
+const proxy = httpProxy.createProxyServer({});
+http
+  .createServer((req, res) => {
+    proxy.web(req, res, { target: "http://localhost:3000" });
+  })
+  .listen(80, () => {
+    console.log("Reverse proxy listening on port 80 → 3000");
+  });
+
 // --- Configuration ---
 const API_URL_FXSSI = "https://c.fxssi.com/api/current-ratios";
 const BASE_INTERVAL_MS = 5 * 60 * 1000;
