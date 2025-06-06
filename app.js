@@ -28,7 +28,7 @@ let jsonDataCacheForStartup = null; // Caches the last jsonData for /start comma
 const app = express();
 
 app.use(
-  "/oauth2callback",
+  "/telegram-calendar-bot",
   createProxyMiddleware({
     target: "http://localhost:3000",
     changeOrigin: true,
